@@ -1,0 +1,301 @@
+import tensorrt as trt
+import pycuda.autoinit
+import pycuda.driver as cuda
+import numpy as np
+import time
+import cv2
+import torch
+import math
+import matplotlib.pyplot as plt
+import tqdm
+
+
+class BaseEngine(object):
+    def __init__(self, engine_path, imgsz=(640, 640)):
+        self.imgsz = imgsz
+        logger = trt.Logger(trt.Logger.WARNING)
+        trt.init_libnvinfer_plugins(logger, '')
+        runtime = trt.Runtime(logger)
+        with open(engine_path, "rb") as f:
+            serialized_engine = f.read()
+        engine = runtime.deserialize_cuda_engine(serialized_engine)
+        self.context = engine.create_execution_context()
+        self.inputs, self.outputs, self.bindings = [], [], []
+        self.stream = cuda.Stream()
+        for binding in engine:
+            size = trt.volume(engine.get_binding_shape(binding))
+            dtype = trt.nptype(engine.get_binding_dtype(binding))
+            host_mem = cuda.pagelocked_empty(size, dtype)
+            device_mem = cuda.mem_alloc(host_mem.nbytes)
+            self.bindings.append(int(device_mem))
+            if engine.binding_is_input(binding):
+                self.inputs.append({'host': host_mem, 'device': device_mem})
+            else:
+                self.outputs.append({'host': host_mem, 'device': device_mem})
+
+    def infer(self, img):
+        self.inputs[0]['host'] = np.ravel(img)
+        # transfer data to the gpu
+        for inp in self.inputs:
+            cuda.memcpy_htod_async(inp['device'], inp['host'], self.stream)
+        # run inference
+        self.context.execute_async_v2(
+            bindings=self.bindings,
+            stream_handle=self.stream.handle)
+        # fetch outputs from gpu
+        for out in self.outputs:
+            cuda.memcpy_dtoh_async(out['host'], out['device'], self.stream)
+        # synchronize stream
+        self.stream.synchronize()
+
+        data = [out['host'] for out in self.outputs]
+        return data
+
+    def get_fps(self):
+        # warmup
+        import time
+        img = np.ones((1, 3, self.imgsz[0], self.imgsz[1]))
+        img = np.ascontiguousarray(img, dtype=np.float32)
+        for _ in range(20):
+            _ = self.infer(img)
+        t1 = time.perf_counter()
+        _ = self.infer(img)
+        print(1/(time.perf_counter() - t1), 'FPS')
+
+
+class auto_segmentation():
+    def __init__(self, img_size=(1920, 1280), kernel_size=640, num_camera=2, engine_path='models/object-detector/y7_b12.trt'):
+        self.img_size = img_size
+        self.num_camera = num_camera
+        self.kernel_size = kernel_size
+
+        self.n_tile_v = math.ceil(img_size[1]/kernel_size)
+        self.n_tile_h = math.ceil(img_size[0]/kernel_size)
+        self.resize_height = self.n_tile_v * self.kernel_size
+        self.resize_width = self.n_tile_h * self.kernel_size
+
+        self.origins = [(j*640, i*640, j*640, i*640,) for i in range(0, self.n_tile_v)
+                        for j in range(0, self.n_tile_h)] * self.num_camera
+        self.pred_batch = BaseEngine(engine_path=engine_path)
+
+    def split_image(self, batch_img):
+        """Support of cameras with different resolution is planend."""
+        batch, camera_count, __, __, channel = batch_img.shape
+        return torch.permute(torch.from_numpy(batch_img).reshape(batch, camera_count*self.n_tile_v, self.kernel_size, self.n_tile_h, self.kernel_size, channel), (0, 1, 3, 5, 2, 4)).ravel().reshape(batch, -1)
+
+    def get_box(self, batch_img, prev_box=None):
+        if len(batch_img.shape) == 4:
+            batch_img = np.expand_dims(batch_img, axis=0)
+        n_batch = batch_img.shape[0]
+        n_camera = batch_img.shape[1]
+
+        if n_camera != self.num_camera:
+            raise ValueError(
+                f"Number of Camera is invalid. Required = {self.num_camera}, Provided = {n_camera}.\n Note that images provided must be in the shape of (batch, {self.num_camera}, {self.resize_height}, {self.resize_width}, 3)")
+
+        if prev_box is None or (isinstance(prev_box, np.ndarray) and (prev_box == None).all()) or (isinstance(prev_box, list) and prev_box == None):
+            replace_missing = False
+        else:
+            replace_missing = True
+            if len(prev_box) != n_camera and not (isinstance(prev_box[0], list) or isinstance(prev_box[0], np.ndarray)):
+                raise ValueError(
+                    f"Length of Previous Box has to match the number of cameras. prev_box length = {len(prev_box)}, number of cameras = {n_camera}")
+
+        if batch_img.shape[1:] != (self.num_camera, self.resize_height, self.resize_width, 3):
+            raise ValueError(
+                f"Images must be in the shape of (batch, {self.num_camera}, {self.resize_height}, {self.resize_width}, 3). Given: {batch_img.shape}")
+
+        split_imgs = self.split_image(batch_img)
+
+        batch_centroids = []
+        for batch in range(n_batch):
+            p = self.pred_batch.infer(split_imgs[batch])
+            p_box = p[1].reshape(self.num_camera, -1)
+            p_class = p[3].reshape(self.num_camera, -1)
+            centroids = []
+            for camera in range(0, n_camera):
+                x1, y1, x2, y2 = 99999, 99999, -99999, -99999
+                num_detections = p_class[camera][p_class[camera] == 4].shape[0]
+
+                # Getting Centroid from all detections < 1 ms
+                if not num_detections > 0:
+                    if replace_missing:
+                        x_center, y_center = prev_box[camera]
+                    else:
+                        centroids.append([np.nan, np.nan])
+                        continue
+                else:
+                    for j in np.where(p_class[camera] == 4)[0]:
+                        origin_index = int(j/100)
+                        det_box = p_box[camera][j*4:j*4+4] + self.origins[origin_index]
+                        x1 = min(x1, det_box[0])
+                        y1 = min(y1, det_box[1])
+                        x2 = max(x2, det_box[2])
+                        y2 = max(y2, det_box[3])
+                    x_center, y_center = int((x1+x2)/2), int((y1+y2)/2)
+
+                # Clipping
+                if x_center > 1600:
+                    x_center = 1600
+                elif x_center < 320:
+                    x_center = 320
+                if y_center > 760:
+                    y_center = 760
+                elif y_center < 320:
+                    y_center = 320
+
+                if replace_missing:
+                    prev_box[camera][0] = x_center
+                    prev_box[camera][1] = y_center
+
+                centroids.append([x_center, y_center])
+            batch_centroids.append(centroids)
+        return np.array(batch_centroids)
+
+    def vis_current_box(self, batch_img, batch_centroids, fig=None, ax=None):
+        if fig == None or ax == None:
+            fig, ax = plt.subplots(batch_img.shape[0], 2, figsize=(20, 20))
+        ax = ax.reshape(-1)
+        for i in range(batch_img.shape[0]):
+            for j in range(batch_img.shape[1]):
+                ax[i*batch_img.shape[1] + j].imshow(batch_img[i][j][batch_centroids[i][j][1]-320:batch_centroids[i]
+                                                    [j][1]+320, batch_centroids[i][j][0]-320:batch_centroids[i][j][0]+320])
+        return fig, ax
+
+    def prepare_imgs(self, batch_img, prev_box=None):
+        if len(batch_img.shape) == 4:
+            batch_img = np.expand_dims(batch_img, axis=0)
+
+        batch_size = batch_img.shape[0]
+        n_camera = batch_img.shape[1]
+
+        if n_camera != self.num_camera:
+            raise ValueError(
+                f"Number of Camera is invalid. Required = {self.num_camera}, Provided = {n_camera}.\n Note that images provided must be in the shape of (batch, {self.num_camera}, {self.resize_height}, {self.resize_width}, 3)")
+
+        if batch_img.shape[1:] != (self.num_camera, self.resize_height, self.resize_width, 3):
+            raise ValueError(
+                f"Images must be in the shape of (batch, {self.num_camera}, {self.resize_height}, {self.resize_width}, 3). Given: {batch_img.shape}")
+
+        box = self.get_box(batch_img=batch_img, prev_box=prev_box)
+        original_img = torch.from_numpy(batch_img.transpose(0, 1, 4, 2, 3))
+        prepared_img = torch.zeros((batch_size, self.num_camera, 3, self.kernel_size, self.kernel_size))
+        for i in range(len(box)):
+            for j in range(len(box[i])):
+                x_center = box[i, j][0]
+                y_center = box[i, j][1]
+                prepared_img[i, j] = original_img[i, j, :, y_center-320:y_center+320, x_center-320:x_center+320]     
+        return prepared_img, box
+
+class main_object_detector():
+    def __init__(self,  img_size=(1920, 1080), kernel_size=640, num_camera=2, engine_path=['models/object-detector/y7_b2.trt', 'models/object-detector/y7_b12.trt']):
+        self.pred_batch = BaseEngine(engine_path=engine_path[1])
+        self.pred_single = BaseEngine(engine_path=engine_path[0])
+        self.auto_segmentation = auto_segmentation()
+        self.num_camera = num_camera
+        self.kernel_size = kernel_size
+        self.img_size = img_size
+    
+    def single_infer(self, batch_img, verbose=True):
+        if len(batch_img.shape) == 4:
+            batch_img = np.expand_dims(batch_img, axis=0)
+        if len(batch_img) > 1:
+            raise ValueError("This function only support single batch inference")
+
+        final_det = torch.zeros(self.num_camera*4)
+        final_score = torch.zeros(self.num_camera)
+
+        t0 = time.time()
+        prepared_img, box = self.auto_segmentation.prepare_imgs(batch_img=batch_img, prev_box=[[0,0], [0,0]])
+        box = box - 320
+        t1 = time.time()
+        
+        p = self.pred_single.infer(prepared_img[0].ravel())
+
+        t2 = time.time()
+
+        p_class = torch.from_numpy(p[3].reshape(self.num_camera, -1))
+        p_box = torch.from_numpy(p[1].reshape(self.num_camera, -1))
+        p_score = torch.from_numpy(p[2].reshape(self.num_camera, -1))
+
+        for camera in range(0, 2):
+            num_detections = p_class[camera][p_class[camera] == 4].shape[0]
+
+            if not num_detections > 0:
+                continue
+            else:
+                for j in np.where(p_class[camera] == 4)[0]:
+                    det_box = p_box[camera][j*4:j*4+4]
+                    det_box[0] += box[0][camera][0]
+                    det_box[2] += box[0][camera][0]
+                    det_box[1] += box[0][camera][1]
+                    det_box[3] += box[0][camera][1]
+
+                    final_score[camera] = p_score[camera, j]
+                    final_det[camera*4:camera*4+4] = det_box
+                    break
+                
+        t3 = time.time()
+        if verbose:
+            print(f"AutoSegmentation : {t1-t0}\nFinal Inference  : {t2-t1}\nPost Processing  : {t3-t2}")
+        return final_det.unsqueeze(0), final_score.unsqueeze(0)
+
+    def all_inference(self, acd, batch_size=6, n_batch_limit = np.inf):
+        final_batch_det = []
+        final_batch_scores = []
+        
+        total_batch = min([acd.get_total_batch(data_index = i, batch_size = batch_size) for i in range(acd.data_count)])
+        for batch_index in tqdm.trange(min(total_batch-1, n_batch_limit)):
+            batch_img = acd.get_frame_from_video(batch_index, size=(1280, 1920), batch_size=batch_size)
+            prepared_img, box = self.auto_segmentation.prepare_imgs(batch_img=batch_img, prev_box=[[0,0], [0,0]])
+            p = self.pred_batch.infer(prepared_img.ravel())
+            box = box - 320
+            p_box = torch.from_numpy(p[1].reshape(batch_size, 2, -1))
+            p_class = torch.from_numpy(p[3].reshape(batch_size, 2, -1))
+            p_score = torch.from_numpy(p[2].reshape(batch_size, 2, -1))
+
+            current_batch_det = torch.zeros((batch_size, 4*2))
+            current_batch_score = torch.zeros((batch_size, 2))
+
+            for batch in range(batch_size):
+                for camera in range(0, 2):
+                    num_detections = p_class[batch, camera][p_class[batch, camera] == 4].shape[0]
+
+                    if not num_detections > 0:
+                        continue
+                    else:
+                        for j in np.where(p_class[batch, camera] == 4)[0]:
+                            det_box = p_box[batch, camera, j*4:j*4+4]
+                            det_box[0] += box[batch, camera][0]
+                            det_box[2] += box[batch, camera][0]
+                            det_box[1] += box[batch, camera][1]
+                            det_box[3] += box[batch, camera][1]
+
+                            current_batch_score[batch, camera] = p_score[batch, camera, j]
+                            current_batch_det[batch, camera*4:camera*4+4] = det_box
+                            break
+            final_batch_det.append(current_batch_det)
+            final_batch_scores.append(current_batch_score)
+        final_batch_det = torch.concatenate(final_batch_det)
+        final_batch_scores = torch.concatenate(final_batch_scores)
+        return final_batch_det, final_batch_scores
+
+    def vis(self, img, boxes, fig=None, ax=None):
+        batch_size, n_camera, __, __, __ = img.shape
+        if (fig is None) or (ax is None):
+            fig, ax = plt.subplots(batch_size, n_camera, figsize = (20,20))
+        if batch_size == 1:
+            ax = np.expand_dims(ax , 0)
+        img = np.ascontiguousarray(img)
+        for batch in range(batch_size):
+            for camera in range(n_camera):
+                temp_img = np.ascontiguousarray(img[batch, camera].copy()[:, :, ::-1])
+                box = boxes[batch, camera*4:camera*4+4]
+                x0 = int(box[0])
+                y0 = int(box[1])
+                x1 = int(box[2])
+                y1 = int(box[3])
+                color = [1, 0, 0]
+                cv2.rectangle(temp_img, (x0, y0), (x1, y1), color, 2)
+                ax[batch, camera].imshow(temp_img)
+        return fig, ax          

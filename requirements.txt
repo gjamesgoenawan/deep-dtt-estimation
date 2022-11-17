@@ -1,0 +1,14 @@
+torch==1.13.0
+torchvision==0.14.0
+fastdtw
+opencv-python
+tqdm
+geopy
+numpy
+tabulate 
+matplotlib
+seaborn
+scipy
+pycuda 
+pyYAML
+ipywidgets
