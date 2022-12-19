@@ -1,0 +1,27 @@
+mlp_dual (Control)   : 0.28%
+
+Input Regularization:
+    Initial Accuracy after data cleaning & preprocessing:
+    Training, 1e-4 lr, 0.01 wd. 0.9 momentum, for 500000 iterations
+    Input Reg + Aux Head : 0.56% & 0.38% MAPE
+
+    Camera 1 Only Training, 1e-4 lr, 500000 epoch
+    Input Reg + Aux Head : 0.40% & 0.38% MAPE
+
+    Both Camera Training, 1e-4 lr, 5000000 epoch
+    Input Reg + Aux Head : 0.29% & 0.24% MAPE
+
+    Camera 1 Only Training, 1e-4 lr, 200000 epoch
+    Input Reg + Aux Head : 0.25% & 0.24% MAPE
+
+LSTM Distance Estimator:
+    Random dropout per batch of 32. Chance = [drop camera 2, drop camera 1, no dropout, no dropout]
+    Train, Adam, 1e-4 lr, 400 epoch
+    1 cam: 0.30%
+    2 cam: 0.22%
+    
+    Train, SGD, 1e-4 lr, 100 epoch
+    1 cam: 0.29%
+    2 cam: 0.20% 
+
+

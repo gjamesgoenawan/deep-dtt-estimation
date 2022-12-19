@@ -10,41 +10,31 @@ import time
 import os
 import cv2
 import matplotlib.pyplot as plt
+from torch.utils.data import Dataset
 print("aircraft-detection custom utils")
 
-def multiway_dtw(data=[]):
+def time_shift_calibration(data = []):
     if len(data) == 0:
         return None
     elif len(data) == 1:
-        return np.expand_dims(np.arange(0, len(data[0])), axis=1)
+        return np.expand_dims(np.arange(0,len(data[0])),axis = 1)
     else:
         base = data[0]
         others = data[1:]
-        start_ends = []
+        start_points = [0]
         for b in others:
-            _, calibration = fastdtw(base, b)
+            _, calibration = fastdtw(base,b)
             calibration = np.array(calibration)
-            start_end = []
-            for i in range(0, 2):
-                calibration_change = calibration[:, i] - np.concatenate(
-                    (calibration[1:, i], [calibration[-1, i]]))
-                start = np.where((calibration_change - np.concatenate(
-                    ([calibration_change[0]], calibration_change[:-1]))) == -1)[0]
-                end = calibration.shape[0] - np.where((calibration_change - np.concatenate(
-                    ([calibration_change[0]], calibration_change[:-1]))) == 1)[0][0] - 1
-                start = 0 if start.shape[0] == 0 else start[0]
-                start_end.append(np.array([start, end]))
-            start_ends.append(start_end)
-        start_ends = np.array(start_ends)
-        max_start_base = start_ends[:, 0, 0].max()
-        max_end_base = start_ends[:, 0, 1].max()
-        calibration = np.expand_dims(np.concatenate((np.zeros(
-            max_start_base, dtype=int) * np.nan, np.arange(0, len(base)), np.zeros(max_end_base, dtype=int) * np.nan)), 1)
-        for i in range(len(start_ends)):
-            current_calibration = np.expand_dims(np.concatenate((np.zeros(max_start_base - start_ends[i, 0, 0] + start_ends[i, 1, 0], dtype=int) * np.nan, np.arange(
-                0, len(others[i])), np.zeros(max_end_base - start_ends[i, 0, 1] + start_ends[i, 1, 1], dtype=int) * np.nan)), 1)
-            calibration = np.concatenate(
-                (calibration, current_calibration), axis=1)
+            delta_calibration = (calibration - np.append(calibration[1:], calibration[-1:], axis = 0))
+            current_base_calibration = delta_calibration[:, 0]
+            current_data_calibration = delta_calibration[:, 1]
+            start_points.append(np.where(current_data_calibration == -1)[0][0] - np.where(current_base_calibration == -1)[0][0])
+        
+        calibration_length = max([start_points[i] + len(data[i]) for i in range(len(data))])
+        calibration = np.empty((calibration_length, len(data)))
+        calibration[:] = np.nan
+        for i in range(len(data)):
+            calibration[start_points[i]:start_points[i]+len(data[i]), i] = np.arange(0, len(data[i]))
         return calibration
 
 class aircraft_camera_data():
@@ -75,7 +65,7 @@ class aircraft_camera_data():
                     int(self.vidcap[data_index].get(cv2.CAP_PROP_FRAME_WIDTH)))
                 self.video_height.append(
                     int(self.vidcap[data_index].get(cv2.CAP_PROP_FRAME_HEIGHT)))
-        self.calibration = multiway_dtw(self.aircraft_data)
+        self.calibration = time_shift_calibration(self.aircraft_data)
         self.synced_data_length = len(self.calibration)
 
     def get_total_batch(self, data_index, batch_size=64):
@@ -104,8 +94,8 @@ class aircraft_camera_data():
                 if synced_index+start_index[0]+i == len(self.calibration) or np.isnan(self.calibration[synced_index+start_index[0]+i][data_index]):
                     break
                 success,image = self.vidcap[data_index].read()
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 if success:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                     imgs[i, data_index, :image.shape[0], :image.shape[1]] = image
                 else:
                     break
@@ -199,3 +189,85 @@ def convert_to_model_format(detections, distances, calibration, scale_pred=100, 
     pred = (np.vstack(pred) / scale_pred)
     gt = (np.expand_dims(np.array(gt), axis=1) / scale_gt)
     return pred, gt
+
+
+def load_compiled_data(ts=[1], ws=[1], rs=[1], offset = [[0,0,0,0],[0,0,0,0]], divider = [[1,1,1,1],[1,1,1,1]], device = torch.device('cpu')):
+    camera_1_dets = []
+    camera_2_dets = []
+    camera_1_ys = []
+    camera_2_ys = []
+
+    offset = torch.tensor(offset, device =device)
+    divider = torch.tensor(divider, device =device)
+
+    for t in ts:
+        for w in ws:
+            for r in rs:
+                with open(f"output/object_detector/t{t}w{w}r{r}.pkl", 'rb') as f:
+                        box, scores, gt_distance = pkl.load(f)
+                gt_distance = torch.from_numpy(gt_distance)
+                camera_1_det = torch.cat(((box[:, :4].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(1) / 10, scores[:, 0].unsqueeze(1)), axis = 1)
+                camera_2_det = torch.cat(((box[:, 4:].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(1) / 10, scores[:, 1].unsqueeze(1)), axis = 1)
+                
+                # Remove Missing Detection
+                
+                f_camera_1_available_detection = torch.all(torch.logical_not(camera_1_det[:, :4] == 0), dim = 1)
+                f_camera_2_available_detection = torch.all(torch.logical_not(camera_2_det[:, :4] == 0), dim = 1)
+                f_camera_1_gt_more_than_1nm = camera_1_det[:, -2] > 0.1
+                f_camera_2_gt_more_than_1nm = camera_2_det[:, -2] > 0.1
+                
+                f_camera_1 = torch.logical_and(f_camera_1_available_detection, f_camera_1_gt_more_than_1nm)
+                f_camera_2 = torch.logical_and(f_camera_2_available_detection, f_camera_2_gt_more_than_1nm)
+                
+                
+                camera_1_det = camera_1_det[f_camera_1].float()
+                camera_2_det = camera_2_det[f_camera_2].float()
+    
+
+                camera_1_dets.append(camera_1_det[:, :4])
+                camera_1_ys.append(camera_1_det[:, -2:])
+                camera_2_dets.append(camera_2_det[:, :4])
+                camera_2_ys.append(camera_2_det[:, -2:])
+                
+    camera_1_y = torch.cat(camera_1_ys).to(device)
+    camera_2_y = torch.cat(camera_2_ys).to(device)      
+    camera_1_dets = torch.cat(camera_1_dets)
+    camera_2_dets = torch.cat(camera_2_dets)
+    
+    # Convert to (X_centroid, Y_centroid, X_width, Y_width)
+    camera_1_x = torch.zeros(camera_1_dets[:, :4].shape, device = device)
+    camera_2_x = torch.zeros(camera_2_dets[:, :4].shape, device = device)
+    camera_1_x[:, 0] = (camera_1_dets[:, 0] + camera_1_dets[:, 2]) / 2
+    camera_1_x[:, 1] = (camera_1_dets[:, 1] + camera_1_dets[:, 3]) / 2
+    camera_1_x[:, 2] = (camera_1_dets[:, 2] - camera_1_dets[:, 0])
+    camera_1_x[:, 3] = (camera_1_dets[:, 3] - camera_1_dets[:, 1])
+    camera_2_x[:, 0] = (camera_2_dets[:, 0] + camera_2_dets[:, 2]) / 2
+    camera_2_x[:, 1] = (camera_2_dets[:, 1] + camera_2_dets[:, 3]) / 2
+    camera_2_x[:, 2] = (camera_2_dets[:, 2] - camera_2_dets[:, 0])
+    camera_2_x[:, 3] = (camera_2_dets[:, 3] - camera_2_dets[:, 1])
+    
+    camera_1_x = (camera_1_x - offset[0]) / divider[0]
+    camera_2_x = (camera_2_x - offset[1]) / divider[1]
+    
+    print(f"""Data Statistic:
+          Camera 1:
+          Mean: {torch.mean(camera_1_x, 0).tolist()}
+          Std : {torch.std(camera_1_x, 0).tolist()}
+          
+          Camera 2:
+          Mean: {torch.mean(camera_2_x, 0).tolist()}
+          Std : {torch.std(camera_2_x, 0).tolist()}
+          """)
+    return camera_1_x, camera_1_y, camera_2_x, camera_2_y
+
+class ObjectDetectorDataset(Dataset):
+    def __init__(self, x, y):
+        print(x.shape, y.shape)
+        self.data = x
+        self.gt = y
+
+    def __len__(self):
+        return len(self.gt)
+
+    def __getitem__(self, idx):
+        return self.data[idx], self.gt[idx]

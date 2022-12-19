@@ -9,59 +9,6 @@ import tqdm
 from pathlib import Path
 from collections import OrderedDict,namedtuple
 
-
-# class BaseEngine(object):
-#     def __init__(self, engine_path, imgsz=(640, 640)):
-#         self.imgsz = imgsz
-#         logger = trt.Logger(trt.Logger.WARNING)
-#         trt.init_libnvinfer_plugins(logger, '')
-#         runtime = trt.Runtime(logger)
-#         with open(engine_path, "rb") as f:
-#             serialized_engine = f.read()
-#         engine = runtime.deserialize_cuda_engine(serialized_engine)
-#         self.context = engine.create_execution_context()
-#         self.inputs, self.outputs, self.bindings = [], [], []
-#         self.stream = cuda.Stream()
-#         for binding in engine:
-#             size = trt.volume(engine.get_binding_shape(binding))
-#             dtype = trt.nptype(engine.get_binding_dtype(binding))
-#             host_mem = cuda.pagelocked_empty(size, dtype)
-#             device_mem = cuda.mem_alloc(host_mem.nbytes)
-#             self.bindings.append(int(device_mem))
-#             if engine.binding_is_input(binding):
-#                 self.inputs.append({'host': host_mem, 'device': device_mem})
-#             else:
-#                 self.outputs.append({'host': host_mem, 'device': device_mem})
-
-#     def infer(self, img):
-#         self.inputs[0]['host'] = np.ravel(img)
-#         # transfer data to the gpu
-#         for inp in self.inputs:
-#             cuda.memcpy_htod_async(inp['device'], inp['host'], self.stream)
-#         # run inference
-#         self.context.execute_async_v2(
-#             bindings=self.bindings,
-#             stream_handle=self.stream.handle)
-#         # fetch outputs from gpu
-#         for out in self.outputs:
-#             cuda.memcpy_dtoh_async(out['host'], out['device'], self.stream)
-#         # synchronize stream
-#         self.stream.synchronize()
-
-#         data = [out['host'] for out in self.outputs]
-#         return data
-
-#     def get_fps(self):
-#         # warmup
-#         import time
-#         img = np.ones((1, 3, self.imgsz[0], self.imgsz[1]))
-#         img = np.ascontiguousarray(img, dtype=np.float32)
-#         for _ in range(20):
-#             _ = self.infer(img)
-#         t1 = time.perf_counter()
-#         _ = self.infer(img)
-#         print(1/(time.perf_counter() - t1), 'FPS')
-
 class TensorRTEngine:
     def __init__(self, engine_path = 'models/object-detector/y7_b12.trt', device = 'cuda:0'):
         self.engine_path = engine_path
@@ -267,12 +214,12 @@ class main_object_detector():
             print(f"AutoSegmentation : {t1-t0}\nFinal Inference  : {t2-t1}\nPost Processing  : {t3-t2}")
         return final_det.unsqueeze(0), final_score.unsqueeze(0)
 
-    def all_inference(self, acd, batch_size=6, n_batch_limit = np.inf):
+    def all_inference(self, acd, batch_size=6, n_batch_limit = np.inf, desc = ""):
         final_batch_det = []
         final_batch_scores = []
         
         total_batch = min([acd.get_total_batch(data_index = i, batch_size = batch_size) for i in range(acd.data_count)])
-        for batch_index in tqdm.trange(min(total_batch, n_batch_limit)):
+        for batch_index in tqdm.trange(min(total_batch, n_batch_limit), desc = desc):
             batch_img = acd.get_frame_from_video(batch_index, size=(1280, 1920), batch_size=batch_size)
             prepared_img, box = self.auto_segmentation.prepare_imgs(batch_img=batch_img, prev_box=[[0,0], [0,0]])
             p = self.pred_batch.infer(prepared_img.ravel())

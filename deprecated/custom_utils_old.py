@@ -352,3 +352,24 @@ class mlp_dual_dropout(nn.Module):
         else:
             return self.fc(x)
 
+def multiway_time_shift(data = [], considered_index = None):
+    def compute_lag(x, ref):
+        correlation = signal.correlate(ref - np.mean(ref), x - np.mean(x), mode="full")
+        lags = signal.correlation_lags(len(ref), len(x), mode="full")
+        lag = lags[np.argmax(abs(correlation))]
+        return lag
+    base = data[0]
+    if considered_index == None:
+        lags = [compute_lag(base[:], data[i][:]) for i in range(0,len(data))]
+    else:
+        lags = [compute_lag(base[:, considered_index], data[i][:, considered_index]) for i in range(0,len(data))]
+    if min(lags) < 0:
+        for i in range(len(lags)):
+            lags[i] += abs(min(lags))
+    calibration_length = max([lags[i] + len(data[i]) for i in range(len(data))])
+    calibration = np.empty((calibration_length, len(data)))
+    calibration[:] = np.nan
+    
+    for i in range(len(data)):
+        calibration[lags[i]:lags[i]+len(data[i]), i] = np.arange(0, len(data[i]))
+    return calibration
