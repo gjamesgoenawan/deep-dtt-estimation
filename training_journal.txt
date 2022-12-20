@@ -1,8 +1,12 @@
-mlp_dual (Control)   : 0.28%
+All MAPE is no test set.
+
+Train Data: ts=[1,2,5],ws=[1],rs=[1,2]
+Test Data : ts=[1,2,5],ws=[1],rs=[3]
+mlp_dual (Control)   : 0.28% MAPE
 
 Input Regularization:
     Initial Accuracy after data cleaning & preprocessing:
-    Training, 1e-4 lr, 0.01 wd. 0.9 momentum, for 500000 iterations
+    Training, SGD, 1e-4 lr, 0.01 wd. 0.9 momentum, for 500000 iterations
     Input Reg + Aux Head : 0.56% & 0.38% MAPE
 
     Camera 1 Only Training, 1e-4 lr, 500000 epoch
@@ -13,6 +17,9 @@ Input Regularization:
 
     Camera 1 Only Training, 1e-4 lr, 200000 epoch
     Input Reg + Aux Head : 0.25% & 0.24% MAPE
+    
+    Both Camera training, Adam, 1e-5 lr, ~50000 iterations
+    Input Reg + Aux Head : 0.15% & 0.16% MAPE
 
 LSTM Distance Estimator:
     Random dropout per batch of 32. Chance = [drop camera 2, drop camera 1, no dropout, no dropout]
