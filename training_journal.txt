@@ -4,7 +4,7 @@ Train Data: ts=[1,2,5],ws=[1],rs=[1,2]
 Test Data : ts=[1,2,5],ws=[1],rs=[3]
 mlp_dual (Control)   : 0.28% MAPE
 
-Input Regularization:
+Input Regulator:
     Initial Accuracy after data cleaning & preprocessing:
     Training, SGD, 1e-4 lr, 0.01 wd. 0.9 momentum, for 500000 iterations
     Input Reg + Aux Head : 0.56% & 0.38% MAPE

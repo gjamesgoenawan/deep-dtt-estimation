@@ -7,13 +7,15 @@ import math
 import matplotlib.pyplot as plt
 import tqdm
 from pathlib import Path
-from collections import OrderedDict,namedtuple
+from collections import OrderedDict, namedtuple
+
 
 class TensorRTEngine:
-    def __init__(self, engine_path = 'models/object-detector/y7_b12.trt', device = 'cuda:0'):
+    def __init__(self, engine_path='models/object-detector/y7_b12.trt', device='cuda:0'):
         self.engine_path = engine_path
         self.device = torch.device(device)
-        self.Binding = namedtuple('Binding', ('name', 'dtype', 'shape', 'data', 'ptr'))
+        self.Binding = namedtuple(
+            'Binding', ('name', 'dtype', 'shape', 'data', 'ptr'))
         self.logger = trt.Logger(trt.Logger.ERROR)
         trt.init_libnvinfer_plugins(self.logger, namespace="")
         with open(self.engine_path, 'rb') as f, trt.Runtime(self.logger) as runtime:
@@ -23,10 +25,14 @@ class TensorRTEngine:
             name = self.model.get_binding_name(index)
             dtype = trt.nptype(self.model.get_binding_dtype(index))
             shape = tuple(self.model.get_binding_shape(index))
-            data = torch.from_numpy(np.empty(shape, dtype=np.dtype(dtype))).to(device)
-            self.bindings[name] = self.Binding(name, dtype, shape, data, int(data.data_ptr()))
-        self.binding_addrs = OrderedDict((n, d.ptr) for n, d in self.bindings.items())
+            data = torch.from_numpy(
+                np.empty(shape, dtype=np.dtype(dtype))).to(device)
+            self.bindings[name] = self.Binding(
+                name, dtype, shape, data, int(data.data_ptr()))
+        self.binding_addrs = OrderedDict((n, d.ptr)
+                                         for n, d in self.bindings.items())
         self.context = self.model.create_execution_context()
+
     def infer(self, img):
         self.binding_addrs['images'] = int(img.to(self.device).data_ptr())
         self.context.execute_v2(list(self.binding_addrs.values()))
@@ -49,7 +55,7 @@ class auto_segmentation():
         self.resize_width = self.n_tile_h * self.kernel_size
 
         self.origins = torch.tensor([(j*640, i*640, j*640, i*640,) for i in range(0, self.n_tile_v)
-                        for j in range(0, self.n_tile_h)] * self.num_camera)
+                                     for j in range(0, self.n_tile_h)] * self.num_camera)
         self.pred_batch = TensorRTEngine(engine_path=engine_path)
 
     def split_image(self, batch_img):
@@ -101,7 +107,8 @@ class auto_segmentation():
                 else:
                     for j in np.where(p_class[camera] == 4)[0]:
                         origin_index = int(j/100)
-                        det_box = p_box[camera][j*4:j*4+4] + self.origins[origin_index]
+                        det_box = p_box[camera][j*4:j*4+4] + \
+                            self.origins[origin_index]
                         x1 = min(x1, det_box[0])
                         y1 = min(y1, det_box[1])
                         x2 = max(x2, det_box[2])
@@ -153,13 +160,16 @@ class auto_segmentation():
 
         box = self.get_box(batch_img=batch_img, prev_box=prev_box)
         original_img = torch.permute(batch_img, (0, 1, 4, 2, 3))
-        prepared_img = torch.zeros((batch_size, self.num_camera, 3, self.kernel_size, self.kernel_size))
+        prepared_img = torch.zeros(
+            (batch_size, self.num_camera, 3, self.kernel_size, self.kernel_size))
         for i in range(len(box)):
             for j in range(len(box[i])):
                 x_center = box[i, j][0]
                 y_center = box[i, j][1]
-                prepared_img[i, j] = original_img[i, j, :, y_center-320:y_center+320, x_center-320:x_center+320]     
+                prepared_img[i, j] = original_img[i, j, :, y_center -
+                                                  320:y_center+320, x_center-320:x_center+320]
         return prepared_img, box
+
 
 class main_object_detector():
     def __init__(self,  img_size=(1920, 1080), kernel_size=640, num_camera=2, engine_path=['models/object-detector/y7_b2.trt', 'models/object-detector/y7_b12.trt']):
@@ -169,21 +179,23 @@ class main_object_detector():
         self.num_camera = num_camera
         self.kernel_size = kernel_size
         self.img_size = img_size
-    
+
     def single_infer(self, batch_img, verbose=True):
         if len(batch_img.shape) == 4:
             batch_img = np.expand_dims(batch_img, axis=0)
         if len(batch_img) > 1:
-            raise ValueError("This function only support single batch inference")
+            raise ValueError(
+                "This function only support single batch inference")
 
         final_det = torch.zeros(self.num_camera*4)
         final_score = torch.zeros(self.num_camera)
 
         t0 = time.time()
-        prepared_img, box = self.auto_segmentation.prepare_imgs(batch_img=batch_img, prev_box=[[0,0], [0,0]])
+        prepared_img, box = self.auto_segmentation.prepare_imgs(
+            batch_img=batch_img, prev_box=[[0, 0], [0, 0]])
         box = box - 320
         t1 = time.time()
-        
+
         p = self.pred_single.infer(prepared_img[0].ravel())
 
         t2 = time.time()
@@ -208,20 +220,24 @@ class main_object_detector():
                     final_score[camera] = p_score[camera, j]
                     final_det[camera*4:camera*4+4] = det_box
                     break
-                
+
         t3 = time.time()
         if verbose:
-            print(f"AutoSegmentation : {t1-t0}\nFinal Inference  : {t2-t1}\nPost Processing  : {t3-t2}")
+            print(
+                f"AutoSegmentation : {t1-t0}\nFinal Inference  : {t2-t1}\nPost Processing  : {t3-t2}")
         return final_det.unsqueeze(0), final_score.unsqueeze(0)
 
-    def all_inference(self, acd, batch_size=6, n_batch_limit = np.inf, desc = ""):
+    def all_infer(self, acd, batch_size=6, n_batch_limit=np.inf, desc=""):
         final_batch_det = []
         final_batch_scores = []
-        
-        total_batch = min([acd.get_total_batch(data_index = i, batch_size = batch_size) for i in range(acd.data_count)])
-        for batch_index in tqdm.trange(min(total_batch, n_batch_limit), desc = desc):
-            batch_img = acd.get_frame_from_video(batch_index, size=(1280, 1920), batch_size=batch_size)
-            prepared_img, box = self.auto_segmentation.prepare_imgs(batch_img=batch_img, prev_box=[[0,0], [0,0]])
+
+        total_batch = min([acd.get_total_batch(
+            data_index=i, batch_size=batch_size) for i in range(acd.data_count)])
+        for batch_index in tqdm.trange(min(total_batch, n_batch_limit), desc=desc):
+            batch_img = acd.get_frame_from_video(
+                batch_index, size=(1280, 1920), batch_size=batch_size)
+            prepared_img, box = self.auto_segmentation.prepare_imgs(
+                batch_img=batch_img, prev_box=[[0, 0], [0, 0]])
             p = self.pred_batch.infer(prepared_img.ravel())
             box = box - 320
             p_box = p[1].reshape(batch_size, 2, -1)
@@ -233,7 +249,8 @@ class main_object_detector():
 
             for batch in range(batch_size):
                 for camera in range(0, 2):
-                    num_detections = p_class[batch, camera][p_class[batch, camera] == 4].shape[0]
+                    num_detections = p_class[batch,
+                                             camera][p_class[batch, camera] == 4].shape[0]
 
                     if not num_detections > 0:
                         continue
@@ -245,8 +262,10 @@ class main_object_detector():
                             det_box[1] += box[batch, camera][1]
                             det_box[3] += box[batch, camera][1]
 
-                            current_batch_score[batch, camera] = p_score[batch, camera, j]
-                            current_batch_det[batch, camera*4:camera*4+4] = det_box
+                            current_batch_score[batch,
+                                                camera] = p_score[batch, camera, j]
+                            current_batch_det[batch,
+                                              camera*4:camera*4+4] = det_box
                             break
             final_batch_det.append(current_batch_det)
             final_batch_scores.append(current_batch_score)
@@ -257,9 +276,9 @@ class main_object_detector():
     def vis(self, img, boxes, fig=None, ax=None):
         batch_size, n_camera, __, __, __ = img.shape
         if (fig is None) or (ax is None):
-            fig, ax = plt.subplots(batch_size, n_camera, figsize = (20,20))
+            fig, ax = plt.subplots(batch_size, n_camera, figsize=(20, 20))
         if len(ax.shape) == 1:
-            ax = np.expand_dims(ax , 0)
+            ax = np.expand_dims(ax, 0)
         img = np.ascontiguousarray(img)
         for batch in range(batch_size):
             for camera in range(n_camera):
@@ -272,4 +291,4 @@ class main_object_detector():
                 color = [1, 0, 0]
                 cv2.rectangle(temp_img, (x0, y0), (x1, y1), color, 2)
                 ax[batch, camera].imshow(temp_img)
-        return fig, ax          
+        return fig, ax
