@@ -1,5 +1,8 @@
 import torch.nn as nn
 import torch
+import matplotlib.pyplot as plt
+import tqdm as tqdm 
+import numpy as np
 
 class LSTM_DE(nn.Module):
     def __init__(self):
@@ -81,22 +84,59 @@ class mlp_dual(nn.Module):
     def forward(self, x):
         return self.fc(x)
 
-class mlp_dual_dropout(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.scale_gt = 8
-        self.scale_pred = 100
-        self.mask = torch.tensor([[1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1],[1,1,1,1,1,1,1,1],[0,0,0,0,1,1,1,1],[1,1,1,1,0,0,0,0]]).to('cuda:0')
-        self.fc = nn.Sequential(nn.Linear(8,256),
-                                nn.ReLU(),
-                                nn.Linear(256, 256),
-                                nn.ReLU(),
-                                nn.Linear(256, 256),
-                                nn.ReLU(),
-                                nn.Linear(256, 1),
-                                nn.ReLU())
-    def forward(self, x):
-        if self.training == True:
-            return self.fc(self.mask[torch.randint(low = 0, high = 8, size = [1]).item()] * x)
+class ensemble():
+    # Results are not meant to be backpropped
+    def __init__(self, input_reg_weights_path, sequential_de_weights_path, device):
+        self.device = device
+        self.input_regs = []
+        self.sequential_de = LSTM_DE().to(self.device)
+        
+        if not isinstance(input_reg_weights_path, list):
+            input_reg_weights_path = [input_reg_weights_path]
+        
+        for i in input_reg_weights_path:
+            temp_model = input_reg().to(device)
+            temp_model.load_state_dict(torch.load(i))
+            self.input_regs.append(temp_model)
+        
+        self.sequential_de.load_state_dict(torch.load(sequential_de_weights_path))
+        
+    def __call__(self, x, batch_mode = True):
+        if batch_mode == True:
+            with torch.no_grad():
+                input_reg_out = torch.zeros((len(x[0]), len(x), 256), device= self.device, requires_grad = False)
+                out = torch.zeros((len(x[0])), device = self.device, requires_grad = False)
+                
+                for cam in range(input_reg_out.shape[1]):
+                    f = torch.logical_not(torch.all(x[cam] == 0, dim = 1))
+                    input_reg_out[f, cam] = self.input_regs[cam](x[cam][f])
+                    
+                for index in tqdm.trange(input_reg_out.shape[0]):
+                    ff = torch.any(input_reg_out[index] != 0, dim = 1)
+                    if ff.any() == True:
+                        out[index] = self.sequential_de(input_reg_out[index][ff])[-1].squeeze()
+                return out
         else:
-            return self.fc(x)
+            with torch.no_grad():
+                input_reg_out = torch.zeros((len(x[0]), len(x), 256), device= self.device, requires_grad = False)
+
+                for cam in range(len(x)):
+                    f = torch.logical_not(torch.all(x[cam] == 0, dim = 1))
+                    input_reg_out[f, cam] = self.input_regs[cam](x[cam][f])
+                
+                ff = torch.any(input_reg_out[index] != 0, dim = 1)
+                if ff.any() == True:
+                    out = self.sequential_de(input_reg_out[index][ff])[-1].squeeze()
+                return out
+                    
+    def plot_error(self, ypred, gt, fig = None, ax = None):
+        if fig == None or ax == None:
+            fig, ax = plt.subplots(1,1,figsize = (10,10))
+        sort_indices = np.argsort(gt.cpu().detach().numpy())
+        error = (ypred - gt) * 100 / gt
+        
+        ax.set_ylabel('% Error')
+        ax.set_xlabel('Airplane Distance (nm)')
+        ax.scatter(gt[sort_indices].cpu().detach().numpy() * 10, error[sort_indices].cpu().detach().numpy(), s = 2)
+        print(f"Mean Absolute % Error : {abs(error).mean()} %")
+        print(f"Max % Error           : {abs(error).max()} %")

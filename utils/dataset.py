@@ -3,7 +3,7 @@ from fastdtw import fastdtw
 import torch
 import math
 import geopy.distance as gdist
-import tqdm.notebook as tqdm
+import tqdm
 import numpy as np
 import pickle as pkl
 import time
@@ -46,9 +46,6 @@ class aircraft_camera_data():
         self.video_length = []
         self.video_width = []
         self.video_height = []
-        self.yolo_model = None
-        self.mlp_model = None
-        self.mlp_dual_model = None
         self.torch_device = 'cuda:0'
         self.data_count = len(data_sources)
         self.touchdown_target_lat_lon = touchdown_target_lat_lon
@@ -99,22 +96,25 @@ class aircraft_camera_data():
                     imgs[i, data_index, :image.shape[0], :image.shape[1]] = image
                 else:
                     break
-                
         return torch.from_numpy(imgs).float() / 255
 
-    def viz_data(self, synced_index, fig=None, ax=None):
+    def viz_data(self, synced_index, stacked = False, fig=None, ax=None):
         if fig == None or ax == None :
-            fig, ax = plt.subplots(1,2, figsize=(20,20))
+            if stacked == True:
+                fig, ax = plt.subplots(1,1,figsize=(20,20))
+            else:
+                fig, ax = plt.subplots(1,2, figsize=(20,20))
         if synced_index > len(self.calibration):
             raise "Index out of Range"
-        imgs = self.get_frame_from_video(synced_index_or_batch_n=synced_index)
+        imgs = self.get_frame_from_video(synced_index_or_batch_n=synced_index).numpy()
         if isinstance(ax, np.ndarray) and len(ax) >= self.data_count:
             ax = ax.reshape(-1,)
             for i in range(self.data_count):
-                ax[i].imshow(imgs[0][i][:, :, ::-1])
+
+                ax[i].imshow(imgs[0][i])
                 ax[i].axis('off')
         else:
-            ax.imshow(np.vstack([imgs[0][i] for i in range(self.data_count)])[:, :, ::-1])
+            ax.imshow(np.vstack([imgs[0][i] for i in range(self.data_count)]))
             ax.axis('off')
         return fig, ax
     
@@ -159,46 +159,13 @@ class aircraft_camera_data():
     #         cv2.putText(img, label_gt, (c1[0] - t_size[0] - 20, c1[1] + 40), 0, tl , [0, 0, 255], thickness=tf, lineType=cv2.LINE_AA)
     #     return img
 
+def load_compiled_data(ts=[1], ws=[1], rs=[1], convert = True, inference_mode = False, offset = [[0,0,0,0],[0,0,0,0]], divider = [[1,1,1,1],[1,1,1,1]], trajectory_threshold = [0.75, 1.5], device = torch.device('cpu'), verbose = True):
+    # Only support 2 cameras
+    camera_1_data = []
+    camera_2_data = []
 
-def convert_to_model_format(detections, distances, calibration, scale_pred=100, scale_gt=8, skip_missing=True):
-    data_count = len(detections)
-    pred = []
-    gt = []
-    for i in range(len(calibration)):
-        if np.isnan(calibration[i]).any():
-            continue
-        skip = False
-        scene_pred = []
-        for j in range(len(detections)):
-            if detections[j][int(calibration[i][j])].shape[0] == 0 or detections[j][int(calibration[i][j])][0][5] != 4:
-                skip = True
-                scene_pred.append(np.array([0, 0, 0, 0]))
-            else:
-                temp_detections = detections[j][int(
-                    calibration[i][j])][0].cpu().detach().numpy()
-                x_center = (temp_detections[2] + temp_detections[0]) / 2
-                y_center = (temp_detections[3] + temp_detections[1]) / 2
-                x_span = temp_detections[2] - temp_detections[0]
-                y_span = temp_detections[3] - temp_detections[1]
-                scene_pred.append(
-                    np.array([x_center, y_center, x_span, y_span]))
-        if skip == True and skip_missing:
-            continue
-        pred.append(np.concatenate(scene_pred))
-        gt.append(distances[i])
-    pred = (np.vstack(pred) / scale_pred)
-    gt = (np.expand_dims(np.array(gt), axis=1) / scale_gt)
-    return pred, gt
-
-
-def load_compiled_data(ts=[1], ws=[1], rs=[1], offset = [[0,0,0,0],[0,0,0,0]], divider = [[1,1,1,1],[1,1,1,1]], device = torch.device('cpu')):
-    camera_1_dets = []
-    camera_2_dets = []
-    camera_1_ys = []
-    camera_2_ys = []
-
-    offset = torch.tensor(offset, device =device)
-    divider = torch.tensor(divider, device =device)
+    offset = torch.tensor(offset, device = device)
+    divider = torch.tensor(divider, device = device)
 
     for t in ts:
         for w in ws:
@@ -210,55 +177,81 @@ def load_compiled_data(ts=[1], ws=[1], rs=[1], offset = [[0,0,0,0],[0,0,0,0]], d
                 camera_2_det = torch.cat(((box[:, 4:].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(1) / 10, scores[:, 1].unsqueeze(1)), axis = 1)
                 
                 # Remove Missing Detection
-                
-                f_camera_1_available_detection = torch.all(torch.logical_not(camera_1_det[:, :4] == 0), dim = 1)
-                f_camera_2_available_detection = torch.all(torch.logical_not(camera_2_det[:, :4] == 0), dim = 1)
-                f_camera_1_gt_more_than_1nm = camera_1_det[:, -2] > 0.1
-                f_camera_2_gt_more_than_1nm = camera_2_det[:, -2] > 0.1
-                
-                f_camera_1 = torch.logical_and(f_camera_1_available_detection, f_camera_1_gt_more_than_1nm)
-                f_camera_2 = torch.logical_and(f_camera_2_available_detection, f_camera_2_gt_more_than_1nm)
-                
-                
-                camera_1_det = camera_1_det[f_camera_1].float()
-                camera_2_det = camera_2_det[f_camera_2].float()
-    
+                camera_1_data.append(camera_1_det)
+                camera_2_data.append(camera_2_det)
+                    
+    camera_1_data = torch.cat(camera_1_data)
+    camera_2_data = torch.cat(camera_2_data)
 
-                camera_1_dets.append(camera_1_det[:, :4])
-                camera_1_ys.append(camera_1_det[:, -2:])
-                camera_2_dets.append(camera_2_det[:, :4])
-                camera_2_ys.append(camera_2_det[:, -2:])
-                
-    camera_1_y = torch.cat(camera_1_ys).to(device)
-    camera_2_y = torch.cat(camera_2_ys).to(device)      
-    camera_1_dets = torch.cat(camera_1_dets)
-    camera_2_dets = torch.cat(camera_2_dets)
+    if convert:
+        # Convert to (X_centroid, Y_centroid, X_width, Y_width)
+        camera_1_xy = torch.zeros(camera_1_data.shape, device = device).float()
+        camera_2_xy = torch.zeros(camera_2_data.shape, device = device).float()
+        camera_1_xy[:, 0] = (camera_1_data[:, 0] + camera_1_data[:, 2]) / 2
+        camera_1_xy[:, 1] = (camera_1_data[:, 1] + camera_1_data[:, 3]) / 2
+        camera_1_xy[:, 2] = (camera_1_data[:, 2] - camera_1_data[:, 0])
+        camera_1_xy[:, 3] = (camera_1_data[:, 3] - camera_1_data[:, 1])
+        camera_1_xy[:, 4:] = camera_1_data[:, 4:]
+        camera_2_xy[:, 0] = (camera_2_data[:, 0] + camera_2_data[:, 2]) / 2
+        camera_2_xy[:, 1] = (camera_2_data[:, 1] + camera_2_data[:, 3]) / 2
+        camera_2_xy[:, 2] = (camera_2_data[:, 2] - camera_2_data[:, 0])
+        camera_2_xy[:, 3] = (camera_2_data[:, 3] - camera_2_data[:, 1])
+        camera_2_xy[:, 4:] = camera_2_data[:, 4:]
+    else:
+        camera_1_xy = camera_1_data.float().to(device)
+        camera_2_xy = camera_2_data.float().to(device)
+
+    f_camera_1_available_detection = torch.all(torch.logical_not(camera_1_xy[:, :4] == 0), dim = 1)
+    f_camera_2_available_detection = torch.all(torch.logical_not(camera_2_xy[:, :4] == 0), dim = 1)
     
-    # Convert to (X_centroid, Y_centroid, X_width, Y_width)
-    camera_1_x = torch.zeros(camera_1_dets[:, :4].shape, device = device)
-    camera_2_x = torch.zeros(camera_2_dets[:, :4].shape, device = device)
-    camera_1_x[:, 0] = (camera_1_dets[:, 0] + camera_1_dets[:, 2]) / 2
-    camera_1_x[:, 1] = (camera_1_dets[:, 1] + camera_1_dets[:, 3]) / 2
-    camera_1_x[:, 2] = (camera_1_dets[:, 2] - camera_1_dets[:, 0])
-    camera_1_x[:, 3] = (camera_1_dets[:, 3] - camera_1_dets[:, 1])
-    camera_2_x[:, 0] = (camera_2_dets[:, 0] + camera_2_dets[:, 2]) / 2
-    camera_2_x[:, 1] = (camera_2_dets[:, 1] + camera_2_dets[:, 3]) / 2
-    camera_2_x[:, 2] = (camera_2_dets[:, 2] - camera_2_dets[:, 0])
-    camera_2_x[:, 3] = (camera_2_dets[:, 3] - camera_2_dets[:, 1])
+    f_camera_1_gt_more_than_1nm = camera_1_xy[:, -2] > 0.1
+    f_camera_2_gt_more_than_1nm = camera_2_xy[:, -2] > 0.1
     
-    camera_1_x = (camera_1_x - offset[0]) / divider[0]
-    camera_2_x = (camera_2_x - offset[1]) / divider[1]
+    # landing trajectory threshold can be determined by plotting Y_centroid against dist)
+    f_camera_1_detections_in_landing_trajectory = camera_1_xy[:, 1] < (trajectory_threshold[0] * divider[0][1] + offset[0][1])
+    f_camera_2_detections_in_landing_trajectory = camera_2_xy[:, 1] < (trajectory_threshold[1] * divider[1][1] + offset[1][1])
+
+    f_camera_single_1 = torch.logical_and(torch.logical_and(f_camera_1_available_detection, f_camera_1_gt_more_than_1nm), f_camera_1_detections_in_landing_trajectory)
+    f_camera_single_2 = torch.logical_and(torch.logical_and(f_camera_2_available_detection, f_camera_2_gt_more_than_1nm), f_camera_2_detections_in_landing_trajectory)
     
-    print(f"""Data Statistic:
-          Camera 1:
-          Mean: {torch.mean(camera_1_x, 0).tolist()}
-          Std : {torch.std(camera_1_x, 0).tolist()}
-          
-          Camera 2:
-          Mean: {torch.mean(camera_2_x, 0).tolist()}
-          Std : {torch.std(camera_2_x, 0).tolist()}
-          """)
-    return camera_1_x, camera_1_y, camera_2_x, camera_2_y
+    f_camera_all_available_detection = torch.logical_and(f_camera_1_available_detection, f_camera_2_available_detection)
+    f_camera_all_gt_more_than_1nm = torch.logical_and(f_camera_1_gt_more_than_1nm, f_camera_2_gt_more_than_1nm)
+    
+    f_camera_dual = torch.logical_and(torch.logical_and(f_camera_all_available_detection, f_camera_all_gt_more_than_1nm), torch.logical_and(f_camera_1_detections_in_landing_trajectory, f_camera_2_detections_in_landing_trajectory))
+    
+    camera_1_xy[:, :4] = (camera_1_xy[:, :4] - offset[0]) / divider[0]
+    camera_2_xy[:, :4] = (camera_2_xy[:, :4] - offset[1]) / divider[1]
+
+    if inference_mode:
+        camera_1_xy[:, :4][torch.logical_not(f_camera_single_1)] = torch.zeros(4, device = device)
+        camera_2_xy[:, :4][torch.logical_not(f_camera_single_2)] = torch.zeros(4, device = device)
+
+        output_dict = {'x': torch.stack([camera_1_xy[:, :4], camera_2_xy[:, :4]]),
+                       'y': torch.stack([camera_1_xy[:, -2:], camera_2_xy[:,-2:]])
+
+                    }
+    else:
+        output_dict = {'single': {'cam_1': {'x':camera_1_xy[f_camera_single_1][:, :4], 
+                                            'y':camera_1_xy[f_camera_single_1][:, -2:]}, 
+                                  'cam_2':{'x':camera_2_xy[f_camera_single_2][:, :4], 
+                                           'y':camera_2_xy[f_camera_single_2][:, -2:]}}, 
+                       'dual': {'cam_1': {'x':camera_1_xy[f_camera_dual][:, :4], 
+                                          'y':camera_1_xy[f_camera_dual][:, -2:]}, 
+                                'cam_2':{'x':camera_2_xy[f_camera_dual][:, :4], 
+                                         'y':camera_2_xy[f_camera_dual][:, -2:]}}
+                    }
+    if verbose:
+        print(f"""Data Statistic:
+            Camera 1:
+            Mean: {torch.mean(camera_1_xy[:, :4], 0).tolist()}
+            Std : {torch.std(camera_1_xy[:, :4], 0).tolist()}
+            
+            Camera 2:
+            Mean: {torch.mean(camera_2_xy[:, :4], 0).tolist()}
+            Std : {torch.std(camera_2_xy[:, :4], 0).tolist()}
+            """)
+    
+    return output_dict
 
 class ObjectDetectorDataset(Dataset):
     def __init__(self, x, y):
