@@ -165,7 +165,7 @@ class aircraft_camera_data():
     #     return img
 
 
-def load_compiled_data(ts=[1], ws=[1], rs=[1], convert=True, inference_mode=False, offset=[[0, 0, 0, 0], [0, 0, 0, 0]], divider=[[1, 1, 1, 1], [1, 1, 1, 1]], trajectory_threshold=[0.75, 1.5], device=torch.device('cpu'), verbose=True):
+def load_compiled_data(ts=[1], ws=[1], rs=[1], convert=True, inference_mode=False, offset=[[0, 0, 0, 0], [0, 0, 0, 0]], divider=[[1, 1, 1, 1], [1, 1, 1, 1]], trajectory_threshold=[np.inf, np.inf], device=torch.device('cpu'), verbose=True):
     # Only support 2 cameras
     camera_1_data = []
     camera_2_data = []
@@ -218,10 +218,8 @@ def load_compiled_data(ts=[1], ws=[1], rs=[1], convert=True, inference_mode=Fals
     f_camera_2_gt_more_than_1nm = camera_2_xy[:, -2] > 0.1
 
     # landing trajectory threshold can be determined by plotting Y_centroid against dist)
-    f_camera_1_detections_in_landing_trajectory = camera_1_xy[:, 1] < (
-        trajectory_threshold[0] * divider[0][1] + offset[0][1])
-    f_camera_2_detections_in_landing_trajectory = camera_2_xy[:, 1] < (
-        trajectory_threshold[1] * divider[1][1] + offset[1][1])
+    f_camera_1_detections_in_landing_trajectory = camera_1_xy[:, 1] < trajectory_threshold[0]
+    f_camera_2_detections_in_landing_trajectory = camera_2_xy[:, 1] < trajectory_threshold[1]
 
     f_camera_single_1 = torch.logical_and(torch.logical_and(
         f_camera_1_available_detection, f_camera_1_gt_more_than_1nm), f_camera_1_detections_in_landing_trajectory)
@@ -259,23 +257,27 @@ def load_compiled_data(ts=[1], ws=[1], rs=[1], convert=True, inference_mode=Fals
                                 'cam_2': {'x': camera_2_xy[f_camera_dual][:, :4],
                                           'y': camera_2_xy[f_camera_dual][:, -2:]}}
                        }
-    if verbose:
-        print(f"""Data Statistic:
-            Camera 1:
-            Mean: {torch.mean(camera_1_xy[:, :4], 0).tolist()}
-            Std : {torch.std(camera_1_xy[:, :4], 0).tolist()}
+        if verbose:
+            print(f"""Data Statistic:\n
+Camera 1:
+    Mean    : {torch.mean(camera_1_xy[f_camera_single_1][:, :4], 0).tolist()}
+    Std     : {torch.std(camera_1_xy[f_camera_single_1][:, :4], 0).tolist()}
+    Min     : {torch.min(camera_1_xy[f_camera_single_1][:, :4], dim = 0).values.tolist()}
+    Min-Max : {(torch.max(camera_1_xy[f_camera_single_1][:, :4], dim = 0).values - torch.min(camera_1_xy[f_camera_single_1][:, :4], dim = 0).values).tolist()}
             
-            Camera 2:
-            Mean: {torch.mean(camera_2_xy[:, :4], 0).tolist()}
-            Std : {torch.std(camera_2_xy[:, :4], 0).tolist()}
-            """)
+Camera 2:
+    Mean    : {torch.mean(camera_2_xy[f_camera_single_2][:, :4], 0).tolist()}
+    Std     : {torch.std(camera_2_xy[f_camera_single_2][:, :4], 0).tolist()}
+    Min     : {torch.min(camera_2_xy[f_camera_single_2][:, :4], dim = 0).values.tolist()}
+    Min-Max : {(torch.max(camera_2_xy[f_camera_single_2][:, :4], dim = 0).values - torch.min(camera_2_xy[f_camera_single_2][:, :4], dim = 0).values).tolist()}
+    """)
+    
 
     return output_dict
 
 
-class ObjectDetectorDataset(Dataset):
+class GeneralDataset(Dataset):
     def __init__(self, x, y):
-        print(x.shape, y.shape)
         self.data = x
         self.gt = y
 

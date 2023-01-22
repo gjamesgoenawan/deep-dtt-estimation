@@ -5,21 +5,10 @@ Test Data : ts=[1,2,5],ws=[1],rs=[3]
 mlp_dual (Control)   : 0.28% MAPE
 
 Input Regulator:
-    Initial Accuracy after data cleaning & preprocessing:
-    Training, SGD, 1e-4 lr, 0.01 wd. 0.9 momentum, for 500000 iterations
-    Input Reg + Aux Head : 0.56% & 0.38% MAPE
+    'all', Adam, 1e-4 lr, 10000 epochs
+    MAPE: 0.28%, 0.31%
 
-    Camera 1 Only Training, 1e-4 lr, 500000 epoch
-    Input Reg + Aux Head : 0.40% & 0.38% MAPE
 
-    Both Camera Training, 1e-4 lr, 5000000 epoch
-    Input Reg + Aux Head : 0.29% & 0.24% MAPE
-
-    Camera 1 Only Training, 1e-4 lr, 200000 epoch
-    Input Reg + Aux Head : 0.25% & 0.24% MAPE
-    
-    Both Camera training, Adam, 1e-5 lr, ~50000 iterations
-    Input Reg + Aux Head : 0.15% & 0.16% MAPE
 
 LSTM Distance Estimator:
     Random dropout per batch of 32. Chance = [drop camera 2, drop camera 1, no dropout, no dropout]
@@ -31,4 +20,13 @@ LSTM Distance Estimator:
     1 cam: 0.29%
     2 cam: 0.20% 
 
-
+Architecture Search:
+    l_l: 325 + 4982 
+    l_m: 307 + 2813
+    l_s: 309 + 2234
+    m_l: 172 + 3289
+    m_m: 178 + 2718
+    m_s: 170 + 2100
+    s_l: 164 + 3111
+    s_m: 163 + 2550
+    s_s: 160 + 2400 
