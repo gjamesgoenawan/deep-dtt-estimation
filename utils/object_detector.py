@@ -36,26 +36,26 @@ class TensorRTEngine:
     def infer(self, img):
         self.binding_addrs['images'] = int(img.to(self.device).data_ptr())
         self.context.execute_v2(list(self.binding_addrs.values()))
-        nums = self.bindings['num_dets'].data.cpu()
-        boxes = self.bindings['det_boxes'].data.cpu()
-        scores = self.bindings['det_scores'].data.cpu()
-        classes = self.bindings['det_classes'].data.cpu()
+        nums = self.bindings['num_dets'].data
+        boxes = self.bindings['det_boxes'].data
+        scores = self.bindings['det_scores'].data
+        classes = self.bindings['det_classes'].data
         return (nums, boxes, scores, classes)
 
 
 class auto_segmentation():
-    def __init__(self, img_size=(1920, 1280), kernel_size=640, num_camera=2, engine_path='models/object-detector/y7_b12.trt'):
+    def __init__(self, img_size=(1920, 1280), kernel_size=640, num_camera=2, engine_path='models/object-detector/y7_b12.trt', device=torch.device('cuda:0')):
         self.img_size = img_size
         self.num_camera = num_camera
         self.kernel_size = kernel_size
-
+        self.device = device
         self.n_tile_v = math.ceil(img_size[1]/kernel_size)
         self.n_tile_h = math.ceil(img_size[0]/kernel_size)
         self.resize_height = self.n_tile_v * self.kernel_size
         self.resize_width = self.n_tile_h * self.kernel_size
 
         self.origins = torch.tensor([(j*640, i*640, j*640, i*640,) for i in range(0, self.n_tile_v)
-                                     for j in range(0, self.n_tile_h)] * self.num_camera)
+                                     for j in range(0, self.n_tile_h)] * self.num_camera, device=self.device)
         self.pred_batch = TensorRTEngine(engine_path=engine_path)
 
     def split_image(self, batch_img):
@@ -67,19 +67,19 @@ class auto_segmentation():
         if len(batch_img.shape) == 4:
             batch_img = np.expand_dims(batch_img, axis=0)
         n_batch = batch_img.shape[0]
-        n_camera = batch_img.shape[1]
+        num_camera = batch_img.shape[1]
 
-        if n_camera != self.num_camera:
+        if num_camera != self.num_camera:
             raise ValueError(
-                f"Number of Camera is invalid. Required = {self.num_camera}, Provided = {n_camera}.\n Note that images provided must be in the shape of (batch, {self.num_camera}, {self.resize_height}, {self.resize_width}, 3)")
+                f"Number of Camera is invalid. Required = {self.num_camera}, Provided = {num_camera}.\n Note that images provided must be in the shape of (batch, {self.num_camera}, {self.resize_height}, {self.resize_width}, 3)")
 
         if prev_box is None or (isinstance(prev_box, np.ndarray) and (prev_box == None).all()) or (isinstance(prev_box, list) and prev_box == None):
             replace_missing = False
         else:
             replace_missing = True
-            if len(prev_box) != n_camera and not (isinstance(prev_box[0], list) or isinstance(prev_box[0], np.ndarray)):
+            if len(prev_box) != num_camera and not (isinstance(prev_box[0], list) or isinstance(prev_box[0], np.ndarray)):
                 raise ValueError(
-                    f"Length of Previous Box has to match the number of cameras. prev_box length = {len(prev_box)}, number of cameras = {n_camera}")
+                    f"Length of Previous Box has to match the number of cameras. prev_box length = {len(prev_box)}, number of cameras = {num_camera}")
 
         if batch_img.shape[1:] != (self.num_camera, self.resize_height, self.resize_width, 3):
             raise ValueError(
@@ -93,7 +93,7 @@ class auto_segmentation():
             p_box = p[1].reshape(self.num_camera, -1)
             p_class = p[3].reshape(self.num_camera, -1)
             centroids = []
-            for camera in range(0, n_camera):
+            for camera in range(0, num_camera):
                 x1, y1, x2, y2 = 99999, 99999, -99999, -99999
                 num_detections = p_class[camera][p_class[camera] == 4].shape[0]
 
@@ -105,7 +105,7 @@ class auto_segmentation():
                         centroids.append([np.nan, np.nan])
                         continue
                 else:
-                    for j in np.where(p_class[camera] == 4)[0]:
+                    for j in torch.where(p_class[camera] == 4)[0]:
                         origin_index = int(j/100)
                         det_box = p_box[camera][j*4:j*4+4] + \
                             self.origins[origin_index]
@@ -148,11 +148,11 @@ class auto_segmentation():
             batch_img = np.expand_dims(batch_img, axis=0)
 
         batch_size = batch_img.shape[0]
-        n_camera = batch_img.shape[1]
+        num_camera = batch_img.shape[1]
 
-        if n_camera != self.num_camera:
+        if num_camera != self.num_camera:
             raise ValueError(
-                f"Number of Camera is invalid. Required = {self.num_camera}, Provided = {n_camera}.\n Note that images provided must be in the shape of (batch, {self.num_camera}, {self.resize_height}, {self.resize_width}, 3)")
+                f"Number of Camera is invalid. Required = {self.num_camera}, Provided = {num_camera}.\n Note that images provided must be in the shape of (batch, {self.num_camera}, {self.resize_height}, {self.resize_width}, 3)")
 
         if batch_img.shape[1:] != (self.num_camera, self.resize_height, self.resize_width, 3):
             raise ValueError(
@@ -161,7 +161,7 @@ class auto_segmentation():
         box = self.get_box(batch_img=batch_img, prev_box=prev_box)
         original_img = torch.permute(batch_img, (0, 1, 4, 2, 3))
         prepared_img = torch.zeros(
-            (batch_size, self.num_camera, 3, self.kernel_size, self.kernel_size))
+            (batch_size, self.num_camera, 3, self.kernel_size, self.kernel_size), device=self.device)
         for i in range(len(box)):
             for j in range(len(box[i])):
                 x_center = box[i, j][0]
@@ -172,11 +172,12 @@ class auto_segmentation():
 
 
 class main_object_detector():
-    def __init__(self,  img_size=(1920, 1080), kernel_size=640, num_camera=2, engine_path=['models/object-detector/y7_b2.trt', 'models/object-detector/y7_b12.trt']):
+    def __init__(self,  img_size=(1920, 1280), kernel_size=640, num_camera=2, engine_path=['models/object-detector/y7_b2.trt', 'models/object-detector/y7_b12.trt'], device=torch.device('cuda:0')):
         self.pred_batch = TensorRTEngine(engine_path=engine_path[1])
         self.pred_single = TensorRTEngine(engine_path=engine_path[0])
         self.auto_segmentation = auto_segmentation()
         self.num_camera = num_camera
+        self.device = device
         self.kernel_size = kernel_size
         self.img_size = img_size
 
@@ -187,8 +188,8 @@ class main_object_detector():
             raise ValueError(
                 "This function only support single batch inference")
 
-        final_det = torch.zeros(self.num_camera*4)
-        final_score = torch.zeros(self.num_camera)
+        final_det = torch.zeros(self.num_camera*4, device=self.device)
+        final_score = torch.zeros(self.num_camera, device=self.device)
 
         t0 = time.time()
         prepared_img, box = self.auto_segmentation.prepare_imgs(
@@ -203,14 +204,14 @@ class main_object_detector():
         p_class = p[3].reshape(self.num_camera, -1)
         p_box = p[1].reshape(self.num_camera, -1)
         p_score = p[2].reshape(self.num_camera, -1)
-
-        for camera in range(0, 2):
+        
+        for camera in range(0, self.num_camera):
             num_detections = p_class[camera][p_class[camera] == 4].shape[0]
 
             if not num_detections > 0:
                 continue
             else:
-                for j in np.where(p_class[camera] == 4)[0]:
+                for j in torch.where(p_class[camera] == 4)[0]:
                     det_box = p_box[camera][j*4:j*4+4]
                     det_box[0] += box[0][camera][0]
                     det_box[2] += box[0][camera][0]
@@ -224,7 +225,7 @@ class main_object_detector():
         t3 = time.time()
         if verbose:
             print(
-                f"AutoSegmentation : {t1-t0}\nFinal Inference  : {t2-t1}\nPost Processing  : {t3-t2}")
+                f"AutoSegmentation : {(t1-t0) * 1000:.2f} ms\nFinal Inference  : {(t2-t1) * 1000:.2f} ms\nPost Processing  : {(t3-t2) * 1000:.2f} ms\nTotal Time       : {(t3-t0) * 1000:.2f} ms")
         return final_det.unsqueeze(0), final_score.unsqueeze(0)
 
     def all_infer(self, acd, batch_size=6, n_batch_limit=np.inf, desc=""):
@@ -255,7 +256,7 @@ class main_object_detector():
                     if not num_detections > 0:
                         continue
                     else:
-                        for j in np.where(p_class[batch, camera] == 4)[0]:
+                        for j in torch.where(p_class[batch, camera] == 4)[0]:
                             det_box = p_box[batch, camera, j*4:j*4+4]
                             det_box[0] += box[batch, camera][0]
                             det_box[2] += box[batch, camera][0]
@@ -274,14 +275,16 @@ class main_object_detector():
         return final_batch_det, final_batch_scores
 
     def vis(self, img, boxes, fig=None, ax=None):
-        batch_size, n_camera, __, __, __ = img.shape
+        batch_size, num_camera, __, __, __ = img.shape
         if (fig is None) or (ax is None):
-            fig, ax = plt.subplots(batch_size, n_camera, figsize=(20, 20))
+            fig, ax = plt.subplots(batch_size, num_camera, figsize=(20, 20))
         if len(ax.shape) == 1:
             ax = np.expand_dims(ax, 0)
+        if isinstance(img, torch.Tensor):
+            img = img.cpu().detach().numpy()
         img = np.ascontiguousarray(img)
         for batch in range(batch_size):
-            for camera in range(n_camera):
+            for camera in range(num_camera):
                 temp_img = np.ascontiguousarray(img[batch, camera].copy())
                 box = boxes[batch, camera*4:camera*4+4]
                 x0 = int(box[0])

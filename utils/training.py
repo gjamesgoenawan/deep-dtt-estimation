@@ -4,6 +4,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from utils.dataset import GeneralDataset
 import random
+import os
 random.seed(0)
 
 try:
@@ -13,7 +14,7 @@ except:
     notebook_mode = False
 
 
-def train_aux(input_regs, aux_head, train_data, test_data, total_epochs=1000, num_camera=2, loss_scale=10, lr=1e-5, mode='auto', optimizers_algortihm='Adam', training_log=None, optimizers=None):
+def train_aux(input_regs, aux_head, train_data, test_data, total_epochs=1000, num_camera=2, lr=1e-5, mode='auto', optimizers_algortihm='Adam', training_log=None, optimizers=None, desc='Training Input Regulator'):
     """
 #### Function to train `input_regs` with `aux_head`
 
@@ -79,15 +80,15 @@ Note:
         current_mode = mode
 
     criterion = torch.nn.MSELoss()
-
+    
     epochs = tqdm.trange(total_epochs, leave=True)
 
-    train_loss = [None] * num_camera
-    test_loss = [None] * num_camera
-    ypred_test = [None] * num_camera
-    ypred_train = [None] * num_camera
-    mape_train = [None] * num_camera
-    mape_test = [None] * num_camera
+    train_loss = [np.nan] * 2
+    test_loss = [np.nan] * 2
+    ypred_test = [np.nan] * 2
+    ypred_train = [np.nan] * 2
+    mape_train = [np.nan] * 2
+    mape_test = [np.nan] * 2
     all_training_tracker = 0
 
     for i in input_regs:
@@ -103,23 +104,21 @@ Note:
 
             if current_mode == 'all':
                 for cam in range(num_camera):
-                    complete_optimizer[cam].zero_grad()
                     # for train_x, train_y in singleview_dataloader[cam]:
                     train_x = train_data['single'][f'cam_{cam+1}']['x']
                     train_y = train_data['single'][f'cam_{cam+1}']['y']
                     train_loss[cam] = criterion(aux_head(input_regs[cam](
-                        train_x)).squeeze(), train_y[:, 0]) * loss_scale
+                        train_x)).squeeze(), train_y[:, 0])
                     train_loss[cam].backward()
                     complete_optimizer[cam].step()
                 all_training_tracker += 1
 
             else:
                 cam = current_mode
-                neck_optimizer[cam].zero_grad()
                 train_x = train_data['single'][f'cam_{cam+1}']['x']
                 train_y = train_data['single'][f'cam_{cam+1}']['y']
                 train_loss[cam] = criterion(aux_head(input_regs[cam](
-                    train_x)).squeeze(), train_y[:, 0]) * loss_scale
+                    train_x)).squeeze(), train_y[:, 0])
                 train_loss[cam].backward()
                 neck_optimizer[cam].step()
 
@@ -134,7 +133,7 @@ Note:
                     ypred_train[cam] = aux_head(input_regs[cam](
                         train_data['single'][f'cam_{cam+1}']['x'])).squeeze()
                     test_loss[cam] = criterion(
-                        ypred_test[cam], test_data['single'][f'cam_{cam+1}']['y'][:, 0]) * loss_scale
+                        ypred_test[cam], test_data['single'][f'cam_{cam+1}']['y'][:, 0])
                     mape_test[cam] = ((abs(ypred_test[cam]-test_data['single']
                                            [f'cam_{cam+1}']['y'][:, 0])/test_data['single'][f'cam_{cam+1}']['y'][:, 0]).mean() * 100).item()
                     mape_train[cam] = ((abs(ypred_train[cam]-train_data['single']
@@ -144,29 +143,26 @@ Note:
                 display.display(epochs.container)
                 print(f"""==========================
 Epoch {epoch}
-Training Modes: {current_mode}
+Training Mode: {current_mode}
+Desc: {desc}
 
 Loss:
     Train:
-        Cam 1 : {train_loss[0]}
-        Cam 2 : {train_loss[1]}
+{''.join([f'        Cam {i + 1} : {train_loss[i]} {os.linesep}' for i in range(len(train_loss))])}
     Test:
-        Cam 1 : {test_loss[0]}
-        Cam 2 : {test_loss[1]}
+{''.join([f'        Cam {i + 1} : {test_loss[i]} {os.linesep}' for i in range(len(test_loss))])}
 
 MAPE
     Train:
-        Cam 1 : {mape_train[0]:.2f}%
-        Cam 2 : {mape_train[1]:.2f}%
+{''.join([f'        Cam {i + 1} : {mape_train[i]:.2f} % {os.linesep}' for i in range(len(mape_train))])}
     Test:
-        Cam 1 : {mape_test[0]:.2f}%
-        Cam 2 : {mape_test[1]:.2f}%
+{''.join([f'        Cam {i + 1} : {mape_test[i]:.2f} % {os.linesep}' for i in range(len(mape_test))])}
 ==========================""")
 
                 mape_train_log = np.append(mape_train_log, mape_train.copy())
                 mape_test_log = np.append(mape_test_log, mape_test.copy())
-
-                if len(mape_train_log) / num_camera > 10 and mode == 'auto':
+                
+                if len(mape_train_log) / num_camera > 10 and mode == 'auto' and num_camera > 1:
                     if current_mode == 'all':
                         if np.std(mape_test_log.reshape(-1, num_camera)[-5:], axis=0).mean() < 0.01 and all_training_tracker > 1500:
                             current_mode = mape_test_log[-num_camera:].argmax()
@@ -184,7 +180,7 @@ MAPE
         return input_regs, aux_head, epoch+1, [complete_optimizer, neck_optimizer], [mape_train_log.reshape(-1, 2), mape_test_log.reshape(-1, 2)]
 
 
-def train_de(input_regs, sequential_de, train_data, test_data, batch_size=32, total_epochs=1000, optimizers_algortihm='Adam', num_camera=2, loss_scale=10, lr=1e-5, mode='random', training_log=None, optimizers=None):
+def train_de(input_regs, sequential_de, train_data, test_data, batch_size=32, total_epochs=1000, optimizers_algortihm='Adam', num_camera=2, lr=1e-5, mode='random', training_log=None, optimizers=None, desc = "Training"):
     """
 #### Function to train `de`
 
@@ -241,25 +237,35 @@ Note:
     criterion = torch.nn.MSELoss()
 
     epochs = tqdm.trange(total_epochs, leave=True)
-
-    train_loss = None
-    test_loss = [None] * 2
-    ypred_train = None
-    ypred_test = [None] * 2
+    
+    depths = ['Shallow :',
+              'Deep    :']
+    train_loss = np.nan
+    test_loss = [np.nan] * 2
+    ypred_train = np.nan
+    ypred_test = [np.nan] * 2
     mape_train = 0
-    mape_test = [None] * 2
-    max_dist_test = [None] * 2
+    mape_test = [np.nan] * 2
+    max_dist_test = [np.nan] * 2
 
     with torch.no_grad():
-        train_x = torch.stack([input_regs[i](
-            train_data['dual'][f'cam_{i+1}']['x']) for i in range(num_camera)], dim=1)
-        train_y = torch.stack(
-            [train_data['dual'][f'cam_{i+1}']['y'] for i in range(num_camera)], dim=1)
+        if num_camera > 1:
+            train_x = torch.stack([input_regs[i](
+                train_data['dual'][f'cam_{i+1}']['x']) for i in range(num_camera)], dim=1)
+            train_y = torch.stack(
+                [train_data['dual'][f'cam_{i+1}']['y'] for i in range(num_camera)], dim=1)
 
-        test_per_cam = [{'x': torch.stack([input_regs[i](test_data['dual'][f'cam_{i+1}']['x']) for i in range(num_camera)], dim=1),
-                         'y': torch.stack([test_data['dual'][f'cam_{i+1}']['y'] for i in range(num_camera)], dim=1)},
-                        {'x': torch.cat([input_regs[i](test_data['single'][f'cam_{i+1}']['x']) for i in range(num_camera)]).unsqueeze(1),
-                         'y': torch.cat([test_data['single'][f'cam_{i+1}']['y'] for i in range(num_camera)]).unsqueeze(1)}]
+            test_per_cam = [{'x': torch.cat([input_regs[i](test_data['single'][f'cam_{i+1}']['x']) for i in range(num_camera)]).unsqueeze(1),
+                             'y': torch.cat([test_data['single'][f'cam_{i+1}']['y'] for i in range(num_camera)]).unsqueeze(1)},
+                            {'x': torch.stack([input_regs[i](test_data['dual'][f'cam_{i+1}']['x']) for i in range(num_camera)], dim=1),
+                             'y': torch.stack([test_data['dual'][f'cam_{i+1}']['y'] for i in range(num_camera)], dim=1)}]
+        else:
+            train_x = input_regs[0](train_data['single'][f'cam_1']['x']).unsqueeze(1)
+            train_y = train_data['single'][f'cam_1']['y'].unsqueeze(1)
+            test_per_cam = [{'x': input_regs[0](test_data['single'][f'cam_1']['x']).unsqueeze(1),
+                             'y': test_data['single'][f'cam_1']['y'].unsqueeze(1)}]
+            mode = 2
+        
 
     total_data = len(train_x)
 
@@ -277,7 +283,6 @@ Note:
                     drop_choice = random.randint(0, 2)
                 else:
                     drop_choice = mode
-
                 if drop_choice < int(train_minibatch_x.shape[1]):
                     train_minibatch_x = train_minibatch_x[:,
                                                           drop_choice:drop_choice+1, :]
@@ -286,7 +291,7 @@ Note:
 
                 ypred = sequential_de(train_minibatch_x)[:, -1].squeeze()
                 train_loss = criterion(
-                    ypred, train_minibatch_y[:, 0, 0]) * loss_scale
+                    ypred, train_minibatch_y[:, 0, 0])
                 train_loss.backward()
                 optimizer.step()
 
@@ -296,40 +301,36 @@ Note:
 
             if epoch % 5 == 0:
                 sequential_de.eval()
-                for cam in range(0, 2):
+                cam_loop = 2 if num_camera > 1 else 1
+                for cam in range(0, cam_loop):
                     ypred_test[cam] = sequential_de(
                         test_per_cam[cam]['x']).squeeze()
                     test_loss[cam] = criterion(
-                        ypred_test[cam], test_per_cam[cam]['y'][:, 0, 0]) * loss_scale
+                        ypred_test[cam], test_per_cam[cam]['y'][:, 0, 0])
                     mape_test[cam] = ((abs(ypred_test[cam]-test_per_cam[cam]['y']
                                       [:, 0, 0])/test_per_cam[cam]['y'][:, 0, 0]).mean() * 100).item()
                     max_dist_test[cam] = abs(
-                        ypred_test[cam]-test_per_cam[cam]['y'][:, 0, 0]).max() * loss_scale
-
+                        ypred_test[cam]-test_per_cam[cam]['y'][:, 0, 0]).max()
                 display.clear_output(wait=True)
                 display.display(epochs.container)
                 print(f"""==========================
 Epoch {epoch}
-
-Drop Choice {drop_choice}
+Training Mode: {mode}
+Desc: {desc}
 
 Loss:
     Train:
         Current : {train_loss}
         
     Test:
-        Deep    : {test_loss[0]}
-        Shallow : {test_loss[1]}
-
+{''.join([f'        {depths[i]} {test_loss[i]} % {os.linesep}' for i in range(len(test_loss))])}
 MAPE 
     Train:
         Current : {(mape_train / total_data):.2f}%
     Test:
-        Deep    : {mape_test[0]:.2f}%
-        Shallow : {mape_test[1]:.2f}%
+{''.join([f'        {depths[i]} {mape_test[i]:.2f} % {os.linesep}' for i in range(len(mape_test))])}
     Test (Max):
-        Deep    : {max_dist_test[0]:.2f} nm
-        Shallow : {max_dist_test[1]:.2f} nm
+{''.join([f'        {depths[i]} {max_dist_test[i] * 10:.2f} nm {os.linesep}' for i in range(len(max_dist_test))])}
 ==========================""")
 
                 mape_train_log = np.append(mape_train_log, mape_train)

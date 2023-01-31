@@ -7,6 +7,7 @@ import tqdm
 import geopy.distance as gdist
 import math
 import torch
+import geopy
 from fastdtw import fastdtw
 
 
@@ -101,6 +102,19 @@ class aircraft_camera_data():
                 else:
                     break
         return torch.from_numpy(imgs).float() / 255
+    
+    def get_current_dtt(self, synced_index):
+        current_calibration = self.calibration[synced_index]
+        if np.logical_not(np.isnan(current_calibration)).any():
+            # find available aircraft data on the current calibration
+            for data_index in range(self.data_count):
+                if not np.isnan(current_calibration[data_index]):
+                    break    
+            coords_2 = (self.aircraft_data[data_index][int(current_calibration[data_index])][0], self.aircraft_data[data_index][int(current_calibration[data_index])][1])
+            gt_distance = gdist.geodesic(self.touchdown_target_lat_lon, coords_2).nm
+            return gt_distance
+        else:
+            return -1
 
     def viz_data(self, synced_index, stacked=False, fig=None, ax=None):
         if fig == None or ax == None:
@@ -139,8 +153,7 @@ class aircraft_camera_data():
                     continue
                 coords = (self.aircraft_data[data_index][int(current_calibration[data_index])]
                           [0], self.aircraft_data[data_index][int(current_calibration[data_index])][1])
-                all_distances[synced_index, i] = (gdist.geodesic(
-                    (self.touchdown_target_lat_lon[0], self.touchdown_target_lat_lon[1]), coords).nm)
+                all_distances[synced_index, i] = (gdist.geodesic((self.touchdown_target_lat_lon[0], self.touchdown_target_lat_lon[1]), coords).nm)
         return all_distances
 
     # def viz_detection(self, detection, prediction, img, gt = None):
@@ -165,31 +178,40 @@ class aircraft_camera_data():
     #     return img
 
 
-def load_compiled_data(ts=[1], ws=[1], rs=[1], convert=True, inference_mode=False, offset=[[0, 0, 0, 0], [0, 0, 0, 0]], divider=[[1, 1, 1, 1], [1, 1, 1, 1]], trajectory_threshold=[np.inf, np.inf], device=torch.device('cpu'), verbose=True):
+def load_compiled_data(ts=[1], ws=[1], rs=[1], unpacked_data = None, convert=True, inference_mode=False, offset=[[0, 0, 0, 0], [0, 0, 0, 0]], divider=[[1, 1, 1, 1], [1, 1, 1, 1]], trajectory_threshold=[np.inf, np.inf], device=torch.device('cpu'), verbose=True):
     # Only support 2 cameras
     camera_1_data = []
     camera_2_data = []
-
+    
+    
     offset = torch.tensor(offset, device=device)
     divider = torch.tensor(divider, device=device)
+    
+    if unpacked_data == None:
+        for t in ts:
+            for w in ws:
+                for r in rs:
+                    with open(f"output/object_detector/t{t}w{w}r{r}.pkl", 'rb') as f:
+                        box, scores, gt_distance = pkl.load(f)
+                    gt_distance = torch.from_numpy(gt_distance)
+                    camera_1_det = torch.cat(((box[:, :4].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
+                        1) / 10, scores[:, 0].unsqueeze(1)), axis=1)
+                    camera_2_det = torch.cat(((box[:, 4:].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
+                        1) / 10, scores[:, 1].unsqueeze(1)), axis=1)
 
-    for t in ts:
-        for w in ws:
-            for r in rs:
-                with open(f"output/object_detector/t{t}w{w}r{r}.pkl", 'rb') as f:
-                    box, scores, gt_distance = pkl.load(f)
-                gt_distance = torch.from_numpy(gt_distance)
-                camera_1_det = torch.cat(((box[:, :4].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
-                    1) / 10, scores[:, 0].unsqueeze(1)), axis=1)
-                camera_2_det = torch.cat(((box[:, 4:].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
-                    1) / 10, scores[:, 1].unsqueeze(1)), axis=1)
-
-                # Remove Missing Detection
-                camera_1_data.append(camera_1_det)
-                camera_2_data.append(camera_2_det)
-
-    camera_1_data = torch.cat(camera_1_data)
-    camera_2_data = torch.cat(camera_2_data)
+                    # Remove Missing Detection
+                    camera_1_data.append(camera_1_det)
+                    camera_2_data.append(camera_2_det)
+        camera_1_data = torch.cat(camera_1_data)
+        camera_2_data = torch.cat(camera_2_data)
+    else:
+        box, scores, gt_distance = unpacked_data
+        if not isinstance(gt_distance, torch.Tensor):
+            gt_distance = torch.from_numpy(gt_distance)
+        camera_1_data = torch.cat(((box[:, :4].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
+            1) / 10, scores[:, 0].unsqueeze(1)), axis=1)
+        camera_2_data = torch.cat(((box[:, 4:].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
+            1) / 10, scores[:, 1].unsqueeze(1)), axis=1)
 
     if convert:
         # Convert to (X_centroid, Y_centroid, X_width, Y_width)
@@ -258,19 +280,25 @@ def load_compiled_data(ts=[1], ws=[1], rs=[1], convert=True, inference_mode=Fals
                                           'y': camera_2_xy[f_camera_dual][:, -2:]}}
                        }
         if verbose:
-            print(f"""Data Statistic:\n
+            try:
+                print(f"""Data Statistic:\n
 Camera 1:
     Mean    : {torch.mean(camera_1_xy[f_camera_single_1][:, :4], 0).tolist()}
     Std     : {torch.std(camera_1_xy[f_camera_single_1][:, :4], 0).tolist()}
     Min     : {torch.min(camera_1_xy[f_camera_single_1][:, :4], dim = 0).values.tolist()}
-    Min-Max : {(torch.max(camera_1_xy[f_camera_single_1][:, :4], dim = 0).values - torch.min(camera_1_xy[f_camera_single_1][:, :4], dim = 0).values).tolist()}
-            
+    Min-Max : {(torch.max(camera_1_xy[f_camera_single_1][:, :4], dim = 0).values - torch.min(camera_1_xy[f_camera_single_1][:, :4], dim = 0).values).tolist()}""")
+            except:
+                print("Camera 1 has no available detection")
+            try:
+                print(f"""
 Camera 2:
     Mean    : {torch.mean(camera_2_xy[f_camera_single_2][:, :4], 0).tolist()}
     Std     : {torch.std(camera_2_xy[f_camera_single_2][:, :4], 0).tolist()}
     Min     : {torch.min(camera_2_xy[f_camera_single_2][:, :4], dim = 0).values.tolist()}
     Min-Max : {(torch.max(camera_2_xy[f_camera_single_2][:, :4], dim = 0).values - torch.min(camera_2_xy[f_camera_single_2][:, :4], dim = 0).values).tolist()}
     """)
+            except:
+                print("Camera 2 has no available detection")
     
 
     return output_dict

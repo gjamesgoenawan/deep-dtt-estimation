@@ -7,6 +7,8 @@ import numpy as np
 from copy import deepcopy
 from torch.utils.data import DataLoader
 from utils.dataset import GeneralDataset
+import torch.nn.init as init
+import utils.object_detector as od
 
 
 class lstm_de(nn.Module):
@@ -78,70 +80,34 @@ class mlp_dual(nn.Module):
         return self.fc(x)
 
 
-class inference_ensemble():
-    import tqdm as tqdm
-    # Results are not meant to be backpropped
-    def __init__(self, input_reg_weights_path, sequential_de_weights_path, device):
+class end2end():
+    def __init__(self, model_conf, offset = None, divider = None, model_state_dict = None, num_camera = 2, img_size=(1920, 1280), kernel_size=640, engine_path=['models/object-detector/y7_b2.trt', 'models/object-detector/y7_b12.trt'], device = torch.device('cuda:0')):
         self.device = device
         self.input_regs = []
-        self.sequential_de = lstm_de().to(self.device)
+        self.num_camera = num_camera
+        self.offset = torch.tensor(offset if offset != None else ([[0,0,0,0]] * self.num_camera), device = device)
+        self.divider = torch.tensor(divider if divider != None else ([[1,1,1,1]] * self.num_camera), device = device)
+        self.ensemble = ensemble(model_conf=model_conf, model_state_dict=model_state_dict, parts_to_load=['input_reg', 'de', 'aux'], num_camera=self.num_camera, device=self.device)
+        self.mod = od.main_object_detector(img_size=img_size, kernel_size=kernel_size, num_camera=self.num_camera, engine_path=engine_path)
 
-        if not isinstance(input_reg_weights_path, list):
-            input_reg_weights_path = [input_reg_weights_path]
+    def single_infer(self, batch_img):
+        if batch_img.device != self.device:
+            batch_img = batch_img.to(self.device)
+        torch.cuda.synchronize()
+        box, score = self.mod.single_infer(batch_img)
+        box = box.reshape(-1, 4)
+        
+        formated_box = torch.zeros(box.shape, device=self.device).float()
+        formated_box[:, 0] = (box[:, 0] + box[:, 2]) / 2
+        formated_box[:, 1] = (box[:, 1] + box[:, 3]) / 2
+        formated_box[:, 2] = (box[:, 2] - box[:, 0])
+        formated_box[:, 3] = (box[:, 3] - box[:, 1])
+        for i in range(self.num_camera):
+            if (formated_box[i] == 0).all() == False:
+                formated_box[i] = (formated_box[i] - self.offset[i]) / self.divider[i]
 
-        for i in input_reg_weights_path:
-            temp_model = mlp_reg().to(device)
-            temp_model.load_state_dict(torch.load(i))
-            self.input_regs.append(temp_model)
-
-        self.sequential_de.load_state_dict(
-            torch.load(sequential_de_weights_path))
-
-    def __call__(self, x, batch_mode=True):
-        if batch_mode == True:
-            with torch.no_grad():
-                input_reg_out = torch.zeros(
-                    (len(x[0]), len(x), 256), device=self.device, requires_grad=False)
-                out = torch.zeros(
-                    (len(x[0])), device=self.device, requires_grad=False)
-
-                for cam in range(input_reg_out.shape[1]):
-                    f = torch.logical_not(torch.all(x[cam] == 0, dim=1))
-                    input_reg_out[f, cam] = self.input_regs[cam](x[cam][f])
-
-                for index in tqdm.trange(input_reg_out.shape[0]):
-                    ff = torch.any(input_reg_out[index] != 0, dim=1)
-                    if ff.any() == True:
-                        out[index] = self.sequential_de(
-                            input_reg_out[index][ff])[-1].squeeze()
-                return out
-        else:
-            with torch.no_grad():
-                input_reg_out = torch.zeros(
-                    (len(x[0]), len(x), 256), device=self.device, requires_grad=False)
-
-                for cam in range(len(x)):
-                    f = torch.logical_not(torch.all(x[cam] == 0, dim=1))
-                    input_reg_out[f, cam] = self.input_regs[cam](x[cam][f])
-
-                ff = torch.any(input_reg_out[index] != 0, dim=1)
-                if ff.any() == True:
-                    out = self.sequential_de(
-                        input_reg_out[index][ff])[-1].squeeze()
-                return out
-
-    def plot_error(self, ypred, gt, fig=None, ax=None):
-        if fig == None or ax == None:
-            fig, ax = plt.subplots(1, 1, figsize=(10, 10))
-        sort_indices = np.argsort(gt.cpu().detach().numpy())
-        error = (ypred - gt) * 100 / gt
-
-        ax.set_ylabel('% Error')
-        ax.set_xlabel('Airplane Distance (nm)')
-        ax.scatter(gt[sort_indices].cpu().detach().numpy() * 10,
-                   error[sort_indices].cpu().detach().numpy(), s=2)
-        print(f"Mean Absolute % Error : {abs(error).mean()} %")
-        print(f"Max % Error           : {abs(error).max()} %")
+        gt = self.ensemble(formated_box.unsqueeze(1), batch_mode = False)
+        return gt
 
 class extract_tensor(nn.Module):
     def forward(self,x):
@@ -161,12 +127,13 @@ class ensemble(nn.Module):
                 result.append(extract_tensor())
         return result
             
-    def __init__(self, model_conf, model_state_dict = None, parts_to_load = ['input_reg', 'de', 'aux'], num_camera = 2, device = torch.device('cpu')):
+    def __init__(self, model_conf, model_state_dict = None, parts_to_load = ['input_reg', 'de', 'aux'], num_camera = 2, initializer = 'kaiming', device = torch.device('cpu'), verbose = "False"):
         super(ensemble, self).__init__()
 
         with open(model_conf, 'rb') as f: 
             conf = yaml.safe_load(f)
 
+        self.verbose = verbose
         self.device = device
         self.num_camera = num_camera
         self.training_log = {'aux': None, 'de': None}
@@ -177,23 +144,69 @@ class ensemble(nn.Module):
         self.aux_head =  nn.Sequential(*self.load_layers(conf['aux'])).to(self.device)
         self.transition_size = next(self.aux_head.parameters()).shape[-1]
 
+        if initializer == 'xavier':
+            self.apply(weight_init)
+            
         if model_state_dict != None:
             self.model_state_dict = torch.load(model_state_dict)
             if self.model_state_dict['num_camera'] == num_camera:
                 if 'input_reg' in parts_to_load:
                     self.input_regs.load_state_dict(self.model_state_dict['state_dict']['input_reg'])
-                    print("input Reg Loaded")
+                    if verbose: print("Input_Reg", end=" ")
                 if 'aux' in parts_to_load:
                     self.aux_head.load_state_dict(self.model_state_dict['state_dict']['aux'])
-                    print("aux Loaded")
+                    if verbose: print("Aux", end=" ")
                 if 'de' in parts_to_load:
                     self.sequential_de.load_state_dict(self.model_state_dict['state_dict']['de'])
-                    print("de Loaded")
+                    if verbose: print("DE", end=" ")
                 self.training_log = self.model_state_dict['training_log']
                 self.epochs = self.model_state_dict['epochs']
+                if verbose: print("Loaded")
             else:
                 self.model_state_dict = None
-         
+
+    def forward(self, x, batch_mode = True, verbose = None):
+        if verbose == None:
+            verbose = self.verbose
+
+        if batch_mode == True:
+            with torch.no_grad():
+                input_reg_out = torch.zeros(
+                    (len(x[0]), len(x), self.transition_size), device=self.device, requires_grad=False)
+                out = torch.zeros(
+                    (len(x[0])), device=self.device, requires_grad=False)
+
+                for cam in range(input_reg_out.shape[1]):
+                    f = torch.logical_not(torch.all(x[cam] == 0, dim=1))
+                    input_reg_out[f, cam] = self.input_regs[cam](x[cam][f])
+                
+                if verbose:
+                    iterable = tqdm.trange(input_reg_out.shape[0])
+                else:
+                    iterable = range(input_reg_out.shape[0])
+                for index in iterable:
+                    ff = torch.any(input_reg_out[index] != 0, dim=1)
+                    if ff.any() == True:
+                        if len(input_reg_out[index][ff].shape) == 2:
+                            current_x = input_reg_out[index][ff].unsqueeze(0)
+                        else:
+                            current_x = input_reg_out[index][ff]
+                        out[index] = self.sequential_de(
+                            current_x)[-1].squeeze()
+                return out
+        else:
+            with torch.no_grad():
+                input_reg_out = torch.zeros(
+                    (len(x), self.transition_size), device=self.device, requires_grad=False)
+                for cam in range(input_reg_out.shape[0]):
+                    if not (x[cam] == 0).all():
+                        input_reg_out[cam] = self.input_regs[cam](x[cam][0])
+
+                ff = torch.any(input_reg_out != 0, dim=1)
+                if ff.any() == True:
+                    out = self.sequential_de(
+                        input_reg_out[ff].unsqueeze(0)).squeeze()
+                return out
     
     def eval_data(self, train_data, test_data, num_camera = 2, batch_size = 32):
         criterion = torch.nn.MSELoss()
@@ -307,37 +320,71 @@ MAPE
         Shallow : {max_dist_test_de[1]:.2f} nm
 ==========================""")
     
-    def forward(self, x, batch_mode = True):
-        if batch_mode == True:
-            with torch.no_grad():
-                input_reg_out = torch.zeros(
-                    (len(x[0]), len(x), self.transition_size), device=self.device, requires_grad=False)
-                out = torch.zeros(
-                    (len(x[0])), device=self.device, requires_grad=False)
 
-                for cam in range(input_reg_out.shape[1]):
-                    f = torch.logical_not(torch.all(x[cam] == 0, dim=1))
-                    input_reg_out[f, cam] = self.input_regs[cam](x[cam][f])
 
-                for index in tqdm.trange(input_reg_out.shape[0]):
-                    ff = torch.any(input_reg_out[index] != 0, dim=1)
-                    if ff.any() == True:
-                        if len(input_reg_out[index][ff].shape) == 2:
-                            current_x = input_reg_out[index][ff].unsqueeze(0)
-                        else:
-                            current_x = input_reg_out[index][ff]
-                        out[index] = self.sequential_de(
-                            current_x)[-1].squeeze()
-                return out
-        else:
-            with torch.no_grad():
-                input_reg_out = torch.zeros(
-                    (len(x), self.transition_size), device=self.device, requires_grad=False)
-                for cam in range(len(x)):
-                    if not torch.any(x[0]==0):
-                        input_reg_out[cam] = self.input_regs[cam](x[cam])
-                ff = torch.any(input_reg_out != 0, dim=1)
-                if ff.any() == True:
-                    out = self.sequential_de(
-                        input_reg_out[ff].unsqueeze(0)).squeeze()
-                return out
+def weight_init(m):
+    '''
+    Usage:
+        model = Model()
+        model.apply(weight_init)
+    '''
+    if isinstance(m, nn.Conv1d):
+        init.normal_(m.weight.data)
+        if m.bias is not None:
+            init.normal_(m.bias.data)
+    elif isinstance(m, nn.Conv2d):
+        init.xavier_normal_(m.weight.data)
+        if m.bias is not None:
+            init.normal_(m.bias.data)
+    elif isinstance(m, nn.Conv3d):
+        init.xavier_normal_(m.weight.data)
+        if m.bias is not None:
+            init.normal_(m.bias.data)
+    elif isinstance(m, nn.ConvTranspose1d):
+        init.normal_(m.weight.data)
+        if m.bias is not None:
+            init.normal_(m.bias.data)
+    elif isinstance(m, nn.ConvTranspose2d):
+        init.xavier_normal_(m.weight.data)
+        if m.bias is not None:
+            init.normal_(m.bias.data)
+    elif isinstance(m, nn.ConvTranspose3d):
+        init.xavier_normal_(m.weight.data)
+        if m.bias is not None:
+            init.normal_(m.bias.data)
+    elif isinstance(m, nn.BatchNorm1d):
+        init.normal_(m.weight.data, mean=1, std=0.02)
+        init.constant_(m.bias.data, 0)
+    elif isinstance(m, nn.BatchNorm2d):
+        init.normal_(m.weight.data, mean=1, std=0.02)
+        init.constant_(m.bias.data, 0)
+    elif isinstance(m, nn.BatchNorm3d):
+        init.normal_(m.weight.data, mean=1, std=0.02)
+        init.constant_(m.bias.data, 0)
+    elif isinstance(m, nn.Linear):
+        init.xavier_normal_(m.weight.data)
+        init.normal_(m.bias.data)
+    elif isinstance(m, nn.LSTM):
+        for param in m.parameters():
+            if len(param.shape) >= 2:
+                init.orthogonal_(param.data)
+            else:
+                init.normal_(param.data)
+    elif isinstance(m, nn.LSTMCell):
+        for param in m.parameters():
+            if len(param.shape) >= 2:
+                init.orthogonal_(param.data)
+            else:
+                init.normal_(param.data)
+    elif isinstance(m, nn.GRU):
+        for param in m.parameters():
+            if len(param.shape) >= 2:
+                init.orthogonal_(param.data)
+            else:
+                init.normal_(param.data)
+    elif isinstance(m, nn.GRUCell):
+        for param in m.parameters():
+            if len(param.shape) >= 2:
+                init.orthogonal_(param.data)
+            else:
+                init.normal_(param.data)
