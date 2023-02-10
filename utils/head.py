@@ -9,6 +9,8 @@ from torch.utils.data import DataLoader
 from utils.dataset import GeneralDataset
 import torch.nn.init as init
 import utils.object_detector as od
+import time
+import cv2
 
 
 class lstm_de(nn.Module):
@@ -90,11 +92,13 @@ class end2end():
         self.ensemble = ensemble(model_conf=model_conf, model_state_dict=model_state_dict, parts_to_load=['input_reg', 'de', 'aux'], num_camera=self.num_camera, device=self.device)
         self.mod = od.main_object_detector(img_size=img_size, kernel_size=kernel_size, num_camera=self.num_camera, engine_path=engine_path)
 
-    def single_infer(self, batch_img):
+    def single_infer(self, batch_img, verbose=True):
         if batch_img.device != self.device:
             batch_img = batch_img.to(self.device)
         torch.cuda.synchronize()
-        box, score = self.mod.single_infer(batch_img)
+        t0 = time.time()
+        box, score = self.mod.single_infer(batch_img, verbose=False)
+        t1 = time.time()
         box = box.reshape(-1, 4)
         
         formated_box = torch.zeros(box.shape, device=self.device).float()
@@ -105,9 +109,58 @@ class end2end():
         for i in range(self.num_camera):
             if (formated_box[i] == 0).all() == False:
                 formated_box[i] = (formated_box[i] - self.offset[i]) / self.divider[i]
+        t2 = time.time()
+        pred = self.ensemble(formated_box.unsqueeze(1), batch_mode = False)
+        t3 = time.time()
+        if verbose:
+            print(f"""Time Profile:
 
-        gt = self.ensemble(formated_box.unsqueeze(1), batch_mode = False)
-        return gt
+Object Detector    : {((t1-t0) * 1000):.2f} ms
+Preprocessing      : {((t2-t1) * 1000):.2f} ms
+Distance Estimator : {((t3-t2) * 1000):.2f} ms
+
+Total Time         : {((t3-t0) * 1000):.2f} ms ({1/(t3-t0)} FPS)
+            """)
+        return box, score, pred.item() * 10
+
+    def vis(self, img, box, score=None, pred=None, gt=None, size =(1080, 1920), fig = None, ax = None):
+        img = img[0]
+        if (fig is None) or (ax is None):
+            fig, ax = plt.subplots(1,img.shape[0],figsize=(20,10))
+        ax = ax.ravel()
+        
+        if isinstance(img, torch.Tensor):
+            img = img.cpu().detach().numpy()
+        else:
+            img = np.ascontiguousarray(img)
+            
+        for i in range(len(box)):
+            c1, c2 = ((int(box[i][0]), int(box[i][1])), (int(box[i][2]), int(box[i][3])))
+            if c1 == (0,0) or c2 == (0,0):
+                continue
+            
+            tl = 1
+            tf = 2
+            color = [1,0,0]
+            cv2.rectangle(img[i], c1, c2, color, thickness=1, lineType=cv2.LINE_AA)
+            
+            if isinstance(pred, torch.Tensor) and isinstance(gt, torch.Tensor):
+                label_pred = f'PRED : {pred:.2f}'
+                label_gt =   f'GT   : {gt:.2f}'
+
+                t_size = cv2.getTextSize(label_pred, 0, tl, tf)[0]
+
+                if c2[0] + 20 + t_size[0] < img.shape[1]:
+                    cv2.putText(img[i], label_pred, (c2[0] + 20, c1[1]), 0, tl , [1, 0, 0], thickness=tf, lineType=cv2.LINE_AA)
+                    cv2.putText(img[i], label_gt, (c2[0] + 20, c1[1] + 40), 0, tl , [0, 0, 1], thickness=tf, lineType=cv2.LINE_AA)
+                else:
+                    cv2.putText(img[i], label_pred, (c1[0] - t_size[0] - 20, c1[1]), 0, tl , [1, 0, 0], thickness=tf, lineType=cv2.LINE_AA)
+                    cv2.putText(img[i], label_gt, (c1[0] - t_size[0] - 20, c1[1] + 40), 0, tl , [0, 0, 1], thickness=tf, lineType=cv2.LINE_AA)
+
+        for i in range(len(ax)):
+            ax[i].imshow(img[i][:size[0], :size[1]])
+        
+        return fig, ax
 
 class extract_tensor(nn.Module):
     def forward(self,x):
@@ -146,7 +199,7 @@ class ensemble(nn.Module):
 
         if initializer == 'xavier':
             self.apply(weight_init)
-            
+
         if model_state_dict != None:
             self.model_state_dict = torch.load(model_state_dict)
             if self.model_state_dict['num_camera'] == num_camera:
@@ -203,6 +256,7 @@ class ensemble(nn.Module):
                         input_reg_out[cam] = self.input_regs[cam](x[cam][0])
 
                 ff = torch.any(input_reg_out != 0, dim=1)
+                out = torch.nan
                 if ff.any() == True:
                     out = self.sequential_de(
                         input_reg_out[ff].unsqueeze(0)).squeeze()

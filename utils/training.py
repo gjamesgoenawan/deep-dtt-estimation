@@ -14,7 +14,7 @@ except:
     notebook_mode = False
 
 
-def train_aux(input_regs, aux_head, train_data, test_data, total_epochs=1000, num_camera=2, lr=1e-5, mode='auto', optimizers_algortihm='Adam', training_log=None, optimizers=None, desc='Training Input Regulator'):
+def train_aux(input_regs, aux_head, train_data, test_data, total_epochs=1000, num_camera=2, lr=1e-5, mode='auto', optimizers_algortihm='Adam', optimizers=None, scheduler_lambda=None, training_log=None, desc='Training Input Regulator'):
     """
 #### Function to train `input_regs` with `aux_head`
 
@@ -25,11 +25,13 @@ Input:
     - `test_data`            : Test  Data that can be obtained from `utils.data.load_compiled_data`.
     - `total_epochs`         : Total Number of epochs to train on.
     - `num_camera`           : Number of camera / views present.
-    - `lr`                   : Learning Rate (will be constant throughout the training).
+    - `lr`                   : Learning Rate.
     - `mode`                 : Training Mode (more details below).
     - `optimizers_algortihm` : Optimizer Algorithm (refer to torch.optim).
-    - `training_log`         : A list of numpy.ndarray to store errors. If `None`, a new list will be created.
     - `optimizers`           : A list of optimizers that will be used. If `None`, a new list will be created.
+    - `scheduler_lambda`     : A function which computes a multiplicative factor given an integer parameter epoch. `LambdaLR` Scheduler is used. If no function is provided, lr will remain constant throughout the training.
+    - `training_log`         : A list of numpy.ndarray to store errors. If `None`, a new list will be created.
+    - `desc`                 : Description (Optional)
 
 Output:
     - `input_regs`           : A list of trained `input_reg` type models.
@@ -50,6 +52,9 @@ Note:
 - It is recommended to pass previous `training_log` and `optimizers` for further training to ensure previous logs are not lost and optimizers state are carried on if necessary.
     """
     global notebook_mode
+    
+    if scheduler_lambda == None:
+        scheduler_lambda = lambda x : 1
 
     if training_log == None:
         mape_train_log = np.empty((0))
@@ -69,11 +74,14 @@ Note:
 
         neck_optimizer = [optimizer_alg(model.parameters(), lr=lr)
                           for model in input_regs]
+        
+        scheduler = [torch.optim.lr_scheduler.LambdaLR(optimizer,scheduler_lambda) for optimizer in (complete_optimizer + neck_optimizer)]
 
     else:
         complete_optimizer = optimizers[0]
         neck_optimizer = optimizers[1]
-
+        scheduler = optimizers[2]
+    
     if mode == 'auto':
         current_mode = 'all'
     else:
@@ -121,6 +129,9 @@ Note:
                     train_x)).squeeze(), train_y[:, 0])
                 train_loss[cam].backward()
                 neck_optimizer[cam].step()
+                
+            for i in scheduler:
+                i.step()
 
             if epoch % 500 == 0:
                 for i in input_regs:
@@ -142,9 +153,10 @@ Note:
                 display.clear_output(wait=True)
                 display.display(epochs.container)
                 print(f"""==========================
-Epoch {epoch}
-Training Mode: {current_mode}
-Desc: {desc}
+Epochs            : {epoch}
+Training Mode     : {current_mode}
+Current LR        : {complete_optimizer[0].state_dict()['param_groups'][0]['lr']:.1e}
+Desc              : {desc}
 
 Loss:
     Train:
@@ -154,9 +166,9 @@ Loss:
 
 MAPE
     Train:
-{''.join([f'        Cam {i + 1} : {mape_train[i]:.2f} % {os.linesep}' for i in range(len(mape_train))])}
+{''.join([f'        Cam {i + 1} : {mape_train[i]:.4f} % {os.linesep}' for i in range(len(mape_train))])}
     Test:
-{''.join([f'        Cam {i + 1} : {mape_test[i]:.2f} % {os.linesep}' for i in range(len(mape_test))])}
+{''.join([f'        Cam {i + 1} : {mape_test[i]:.4f} % {os.linesep}' for i in range(len(mape_test))])}
 ==========================""")
 
                 mape_train_log = np.append(mape_train_log, mape_train.copy())
@@ -164,23 +176,24 @@ MAPE
                 
                 if len(mape_train_log) / num_camera > 10 and mode == 'auto' and num_camera > 1:
                     if current_mode == 'all':
-                        if np.std(mape_test_log.reshape(-1, num_camera)[-5:], axis=0).mean() < 0.01 and all_training_tracker > 1500:
+                        if np.std(mape_test_log.reshape(-1, num_camera)[-5:], axis=0).mean() < 0.005 and all_training_tracker > 1500:
                             current_mode = mape_test_log[-num_camera:].argmax()
 
                     else:
-                        if mape_test_log[-num_camera:].std() < 0.01:
+                        if mape_test_log[-num_camera:].std() < 0.005:
                             current_mode = 'all'
                             all_training_tracker = 0
 
                 for i in input_regs:
                     i.train()
                 aux_head.train()
-        return input_regs, aux_head, epoch+1, [complete_optimizer, neck_optimizer], [mape_train_log.reshape(-1, 2), mape_test_log.reshape(-1, 2)]
+                
+        return input_regs, aux_head, epoch+1, [complete_optimizer, neck_optimizer, scheduler], [mape_train_log.reshape(-1, 2), mape_test_log.reshape(-1, 2)]
     except KeyboardInterrupt:
-        return input_regs, aux_head, epoch+1, [complete_optimizer, neck_optimizer], [mape_train_log.reshape(-1, 2), mape_test_log.reshape(-1, 2)]
+        return input_regs, aux_head, epoch+1, [complete_optimizer, neck_optimizer, scheduler], [mape_train_log.reshape(-1, 2), mape_test_log.reshape(-1, 2)]
 
 
-def train_de(input_regs, sequential_de, train_data, test_data, batch_size=32, total_epochs=1000, optimizers_algortihm='Adam', num_camera=2, lr=1e-5, mode='random', training_log=None, optimizers=None, desc = "Training"):
+def train_de(input_regs, sequential_de, train_data, test_data, batch_size=32, total_epochs=1000, num_camera=2, lr=1e-5, mode='random', optimizers_algortihm='Adam', optimizers=None, scheduler_lambda=None, training_log=None, desc = "Training"):
     """
 #### Function to train `de`
 
@@ -195,8 +208,10 @@ Input:
     - `lr`                   : Learning Rate (will be constant throughout the training).
     - `mode`                 : Training Mode (more details below).
     - `optimizers_algortihm` : Optimizer Algorithm (refer to torch.optim).
-    - `training_log`         : A list of numpy.ndarray to store errors. If `None`, a new list will be created.
     - `optimizers`           : A list of optimizers that will be used. If `None`, a new list will be created.
+    - `scheduler_lambda`     : A function which computes a multiplicative factor given an integer parameter epoch. `LambdaLR` Scheduler is used. If no function is provided, lr will remain constant throughout the training.
+    - `training_log`         : A list of numpy.ndarray to store errors. If `None`, a new list will be created.
+    - `desc`                 : Description (Optional)
 
 Output:
     - `input_regs`           : A list of trained `input_reg` type models.
@@ -228,11 +243,16 @@ Note:
         optimizer_alg = torch.optim.Adam
     elif optimizers_algortihm == 'SGD':
         optimizer_alg = torch.optim.SGD
-
+        
+    if scheduler_lambda == None:
+        scheduler_lambda = lambda x : 1
+        
     if optimizers == None or optimizers[0].param_groups[-1]['lr'] != lr:
         optimizer = optimizer_alg(sequential_de.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,scheduler_lambda)
     else:
         optimizer = optimizers[0]
+        scheduler = optimizers[1]
 
     criterion = torch.nn.MSELoss()
 
@@ -265,7 +285,6 @@ Note:
             test_per_cam = [{'x': input_regs[0](test_data['single'][f'cam_1']['x']).unsqueeze(1),
                              'y': test_data['single'][f'cam_1']['y'].unsqueeze(1)}]
             mode = 2
-        
 
     total_data = len(train_x)
 
@@ -283,6 +302,7 @@ Note:
                     drop_choice = random.randint(0, 2)
                 else:
                     drop_choice = mode
+                    
                 if drop_choice < int(train_minibatch_x.shape[1]):
                     train_minibatch_x = train_minibatch_x[:,
                                                           drop_choice:drop_choice+1, :]
@@ -298,24 +318,33 @@ Note:
                 if epoch % 5 == 0:
                     mape_train += ((abs(ypred-train_minibatch_y[:, 0, 0])/train_minibatch_y[:, 0, 0]).mean(
                     ) * 100).item() * len(train_minibatch_x)
-
+                    
+            scheduler.step()
+            
             if epoch % 5 == 0:
                 sequential_de.eval()
-                cam_loop = 2 if num_camera > 1 else 1
-                for cam in range(0, cam_loop):
-                    ypred_test[cam] = sequential_de(
-                        test_per_cam[cam]['x']).squeeze()
-                    test_loss[cam] = criterion(
-                        ypred_test[cam], test_per_cam[cam]['y'][:, 0, 0])
-                    mape_test[cam] = ((abs(ypred_test[cam]-test_per_cam[cam]['y']
-                                      [:, 0, 0])/test_per_cam[cam]['y'][:, 0, 0]).mean() * 100).item()
-                    max_dist_test[cam] = abs(
-                        ypred_test[cam]-test_per_cam[cam]['y'][:, 0, 0]).max()
+                with torch.no_grad():
+                    cam_loop = 2 if num_camera > 1 else 1
+                    for cam in range(0, cam_loop):
+                        ypred_test[cam] = sequential_de(
+                            test_per_cam[cam]['x']).squeeze()
+                        test_loss[cam] = criterion(
+                            ypred_test[cam], test_per_cam[cam]['y'][:, 0, 0])
+                        mape_test[cam] = ((abs(ypred_test[cam]-test_per_cam[cam]['y']
+                                          [:, 0, 0])/test_per_cam[cam]['y'][:, 0, 0]).mean() * 100).item()
+                        max_dist_test[cam] = abs(
+                            ypred_test[cam]-test_per_cam[cam]['y'][:, 0, 0]).max()
+                        
+                        #Prototype
+                    test_pe = (abs(ypred_test[0]-test_per_cam[0]['y'][:, 0, 0])/test_per_cam[0]['y'][:, 0, 0])
+
                 display.clear_output(wait=True)
                 display.display(epochs.container)
+                print(test_pe[:int(test_pe.shape[0]/2)].mean().item(), test_pe[int(test_pe.shape[0]/2):].mean().item())
                 print(f"""==========================
 Epoch {epoch}
-Training Mode: {mode}
+Training Mode: {drop_choice}
+Current LR: {optimizer.state_dict()['param_groups'][0]['lr']:.1e} 
 Desc: {desc}
 
 Loss:
@@ -323,22 +352,22 @@ Loss:
         Current : {train_loss}
         
     Test:
-{''.join([f'        {depths[i]} {test_loss[i]} % {os.linesep}' for i in range(len(test_loss))])}
+{''.join([f'        {depths[i]} {test_loss[i]} {os.linesep}' for i in range(len(test_loss))])}
 MAPE 
     Train:
-        Current : {(mape_train / total_data):.2f}%
+        Current : {(mape_train / total_data):.4f}%
     Test:
-{''.join([f'        {depths[i]} {mape_test[i]:.2f} % {os.linesep}' for i in range(len(mape_test))])}
+{''.join([f'        {depths[i]} {mape_test[i]:.4f} % {os.linesep}' for i in range(len(mape_test))])}
     Test (Max):
-{''.join([f'        {depths[i]} {max_dist_test[i] * 10:.2f} nm {os.linesep}' for i in range(len(max_dist_test))])}
+{''.join([f'        {depths[i]} {max_dist_test[i] * 10:.4f} nm {os.linesep}' for i in range(len(max_dist_test))])}
 ==========================""")
-
+                
                 mape_train_log = np.append(mape_train_log, mape_train)
                 mape_test_log = np.append(mape_test_log, mape_test.copy())
                 mape_train = 0
                 sequential_de.train()
 
-        return input_regs, sequential_de, epoch+1, [optimizer], [mape_train_log, mape_test_log]
+        return input_regs, sequential_de, epoch+1, [optimizer, scheduler], [mape_train_log, mape_test_log]
 
     except KeyboardInterrupt:
-        return input_regs, sequential_de, epoch+1, [optimizer], [mape_train_log, mape_test_log]
+        return input_regs, sequential_de, epoch+1, [optimizer, scheduler], [mape_train_log, mape_test_log]

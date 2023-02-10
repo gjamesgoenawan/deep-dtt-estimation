@@ -116,7 +116,7 @@ class aircraft_camera_data():
         else:
             return -1
 
-    def viz_data(self, synced_index, stacked=False, fig=None, ax=None):
+    def vis_frame(self, synced_index, stacked=False, fig=None, ax=None):
         if fig == None or ax == None:
             if stacked == True:
                 fig, ax = plt.subplots(1, 1, figsize=(20, 20))

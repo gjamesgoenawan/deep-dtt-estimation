@@ -278,8 +278,10 @@ class main_object_detector():
         batch_size, num_camera, __, __, __ = img.shape
         if (fig is None) or (ax is None):
             fig, ax = plt.subplots(batch_size, num_camera, figsize=(20, 20))
-        if len(ax.shape) == 1:
+        if batch_size==1:
             ax = np.expand_dims(ax, 0)
+        if num_camera==1:
+            ax = np.expand_dims(ax, 1)
         if isinstance(img, torch.Tensor):
             img = img.cpu().detach().numpy()
         img = np.ascontiguousarray(img)
