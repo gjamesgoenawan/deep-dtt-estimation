@@ -1,6 +1,6 @@
 # Deep Distance-to-Touchdown Prediction
 
-<img src='images/normal_frame.png'></img>
+<img src='images/normal_frame_inference.png'></img>
 
 Our Paper
 
