@@ -1,5 +1,7 @@
 # Deep Distance-to-Touchdown Prediction
 
+<img src='images/normal_frame.png'></img>
+
 Our Paper
 
 An Implementation of research by [Dr. Duc-Thinh Pham](https://scholar.google.com.sg/citations?user=hrGEgUUAAAAJ&hl=en), [Gabriel James Goeawan](https://www.linkedin.com/in/gjamesgoenawan/),  and supervised by [Prof. Sameer Alam](https://scholar.google.com.sg/citations?user=5W6FyV0AAAAJ&hl=en) under Air Traffic Management Institute with and collaboration with Civil Aviation Authority of Singapore.

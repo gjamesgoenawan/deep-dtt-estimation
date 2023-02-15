@@ -4,12 +4,13 @@ import matplotlib.pyplot as plt
 import yaml
 import tqdm.auto as tqdm
 import numpy as np
-from copy import deepcopy
+from types import NoneType
 from torch.utils.data import DataLoader
 from utils.dataset import GeneralDataset
 import torch.nn.init as init
 import utils.object_detector as od
 import time
+
 import cv2
 
 
@@ -144,7 +145,7 @@ Total Time         : {((t3-t0) * 1000):.2f} ms ({1/(t3-t0)} FPS)
             color = [1,0,0]
             cv2.rectangle(img[i], c1, c2, color, thickness=1, lineType=cv2.LINE_AA)
             
-            if isinstance(pred, torch.Tensor) and isinstance(gt, torch.Tensor):
+            if not (isinstance(pred, NoneType) or isinstance(gt, NoneType)):
                 label_pred = f'PRED : {pred:.2f}'
                 label_gt =   f'GT   : {gt:.2f}'
 
