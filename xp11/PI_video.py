@@ -1,18 +1,14 @@
 """
-PI_custom_plugin
+PI_video.py
 
 Provides tool to place a static camera on screen, record game screens, and plane details.
 
 """
 
-from multiprocessing import current_process
 import xp
 import os
-import time
 import pyautogui
 import pickle as pkl
-import threading
-import asyncio
 import geopy.distance
 import statistics
 
@@ -26,7 +22,7 @@ except ImportError:
 
 class PythonInterface:
     def __init__(self):
-        self.Name = "Simulation Data Gatherer v1.1"
+        self.Name = "Simulation Tool v1.1"
         self.Sig = "camera1.demos.xppython3"
         self.Desc = "Module for data gathering"
         self.plane_lat = None
