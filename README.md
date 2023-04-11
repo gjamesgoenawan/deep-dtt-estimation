@@ -33,7 +33,7 @@ If a specific PyTorch and CUDA version is needed, refer to [Pytorch Website](htt
 <br>
 
 ## Demo
-A quick demo of pretrained model can be viewed in [`modeling_end2end.ipynb`](modeling_end2end.ipynb)
+A quick demo of pretrained model can be viewed in [`demo_end2end.ipynb`](demo_end2end.ipynb)
 <br><br>
 
 ## Data Generation
