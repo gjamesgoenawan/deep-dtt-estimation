@@ -5,7 +5,6 @@ from torch.utils.data import DataLoader
 from utils.dataset import GeneralDataset
 import random
 import os
-random.seed(0)
 
 try:
     from IPython import display
@@ -13,8 +12,7 @@ try:
 except:
     notebook_mode = False
 
-
-def train_aux(input_regs, aux_head, train_data, test_data, total_epochs=1000, num_camera=2, lr=1e-5, mode='auto', optimizers_algortihm='Adam', optimizers=None, scheduler_lambda=None, training_log=None, desc='Training Input Regulator'):
+def train_aux(input_regs, aux_head, train_data, test_data, total_epochs=1000, num_camera=2, lr=1e-5, mode='auto', optimizers_algortihm='Adam', optimizer=None, scheduler_lambda=None, training_log=None, desc='Training Input Regulator'):
     """
 #### Function to train `input_regs` with `aux_head`
 
@@ -28,7 +26,7 @@ Input:
     - `lr`                   : Learning Rate.
     - `mode`                 : Training Mode (more details below).
     - `optimizers_algortihm` : Optimizer Algorithm (refer to torch.optim).
-    - `optimizers`           : A list of optimizers that will be used. If `None`, a new list will be created.
+    - `optimizer`           : A list of optimizers that will be used. If `None`, a new list will be created.
     - `scheduler_lambda`     : A function which computes a multiplicative factor given an integer parameter epoch. `LambdaLR` Scheduler is used. If no function is provided, lr will remain constant throughout the training.
     - `training_log`         : A list of numpy.ndarray to store errors. If `None`, a new list will be created.
     - `desc`                 : Description (Optional)
@@ -53,6 +51,11 @@ Note:
     """
     global notebook_mode
     
+    def freeze(model_list, requires_grad):
+        for model in model_list:
+            for i in model.parameters():
+                i.requires_grad = requires_grad
+    
     if scheduler_lambda == None:
         scheduler_lambda = lambda x : 1
 
@@ -67,20 +70,14 @@ Note:
         optimizer_alg = torch.optim.Adam
     elif optimizers_algortihm == 'SGD':
         optimizer_alg = torch.optim.SGD
+    elif optimizers_algortihm == 'RMSprop':
+        optimizer_alg = torch.optim.RMSprop
+    
 
-    if optimizers == None or optimizers[0][0].param_groups[-1]['lr'] != lr:
-        complete_optimizer = [optimizer_alg(list(model.parameters(
-        )) + list(aux_head.parameters()), lr=lr) for model in input_regs]
-
-        neck_optimizer = [optimizer_alg(model.parameters(), lr=lr)
-                          for model in input_regs]
+    if optimizer == None or optimizer.param_groups[-1]['lr'] != lr:
+        optimizer = optimizer_alg(list(input_regs.parameters()) + list(aux_head.parameters()), lr = lr)
         
-        scheduler = [torch.optim.lr_scheduler.LambdaLR(optimizer,scheduler_lambda) for optimizer in (complete_optimizer + neck_optimizer)]
-
-    else:
-        complete_optimizer = optimizers[0]
-        neck_optimizer = optimizers[1]
-        scheduler = optimizers[2]
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, scheduler_lambda)
     
     if mode == 'auto':
         current_mode = 'all'
@@ -102,36 +99,64 @@ Note:
     for i in input_regs:
         i.train()
     aux_head.train()
+    
+    freeze([input_regs, aux_head], False)
 
     try:
         for epoch in epochs:
-            for i in complete_optimizer:
-                i.zero_grad()
-            for i in neck_optimizer:
-                i.zero_grad()
-
             if current_mode == 'all':
                 for cam in range(num_camera):
+                    optimizer.zero_grad()
+                    freeze([input_regs[cam], aux_head], True)
                     # for train_x, train_y in singleview_dataloader[cam]:
                     train_x = train_data['single'][f'cam_{cam+1}']['x']
                     train_y = train_data['single'][f'cam_{cam+1}']['y']
                     train_loss[cam] = criterion(aux_head(input_regs[cam](
                         train_x)).squeeze(), train_y[:, 0])
                     train_loss[cam].backward()
-                    complete_optimizer[cam].step()
+                    optimizer.step()
+                    freeze([input_regs[cam], aux_head], False)
                 all_training_tracker += 1
+                
+            elif current_mode == 'all_no_aux':
+                for cam in range(num_camera):
+                    optimizer.zero_grad()
+                    freeze([input_regs[cam]], True)
+                    # for train_x, train_y in singleview_dataloader[cam]:
+                    train_x = train_data['single'][f'cam_{cam+1}']['x']
+                    train_y = train_data['single'][f'cam_{cam+1}']['y']
+                    train_loss[cam] = criterion(aux_head(input_regs[cam](
+                        train_x)).squeeze(), train_y[:, 0])
+                    train_loss[cam].backward()
+                    optimizer.step()
+                    freeze([input_regs[cam]], False)
+                
+            elif current_mode == 'aux':
+                for cam in range(num_camera):
+                    optimizer.zero_grad()
+                    freeze([aux_head], True)
+                    # for train_x, train_y in singleview_dataloader[cam]:
+                    train_x = train_data['single'][f'cam_{cam+1}']['x']
+                    train_y = train_data['single'][f'cam_{cam+1}']['y']
+                    train_loss[cam] = criterion(aux_head(input_regs[cam](
+                        train_x)).squeeze(), train_y[:, 0])
+                    train_loss[cam].backward()
+                    optimizer.step()
+                    freeze([aux_head], False)
 
             else:
+                optimizer.zero_grad()
                 cam = current_mode
+                freeze([input_regs[cam]], True)
                 train_x = train_data['single'][f'cam_{cam+1}']['x']
                 train_y = train_data['single'][f'cam_{cam+1}']['y']
                 train_loss[cam] = criterion(aux_head(input_regs[cam](
                     train_x)).squeeze(), train_y[:, 0])
                 train_loss[cam].backward()
-                neck_optimizer[cam].step()
+                optimizer.step()
+                freeze([input_regs[cam]], False)
                 
-            for i in scheduler:
-                i.step()
+            scheduler.step()
 
             if epoch % 500 == 0:
                 for i in input_regs:
@@ -155,7 +180,7 @@ Note:
                 print(f"""==========================
 Epochs            : {epoch}
 Training Mode     : {current_mode}
-Current LR        : {complete_optimizer[0].state_dict()['param_groups'][0]['lr']:.1e}
+Current LR        : {optimizer.param_groups[-1]['lr']:.1e}
 Desc              : {desc}
 
 Loss:
@@ -187,10 +212,11 @@ MAPE
                 for i in input_regs:
                     i.train()
                 aux_head.train()
-                
-        return input_regs, aux_head, epoch+1, [complete_optimizer, neck_optimizer, scheduler], [mape_train_log.reshape(-1, 2), mape_test_log.reshape(-1, 2)]
+        
+        return input_regs, aux_head, epoch+1, optimizer, [mape_train_log.reshape(-1, 2), mape_test_log.reshape(-1, 2)]
     except KeyboardInterrupt:
-        return input_regs, aux_head, epoch+1, [complete_optimizer, neck_optimizer, scheduler], [mape_train_log.reshape(-1, 2), mape_test_log.reshape(-1, 2)]
+        #freeze([input_regs, aux_head], False)
+        return input_regs, aux_head, epoch+1, optimizer, [mape_train_log.reshape(-1, 2), mape_test_log.reshape(-1, 2)]
 
 
 def train_de(input_regs, sequential_de, train_data, test_data, batch_size=32, total_epochs=1000, num_camera=2, lr=1e-5, mode='random', optimizers_algortihm='Adam', optimizers=None, scheduler_lambda=None, training_log=None, desc = "Training"):

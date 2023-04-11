@@ -7,7 +7,7 @@ import tqdm
 import geopy.distance as gdist
 import math
 import torch
-import geopy
+from types import NoneType
 from fastdtw import fastdtw
 
 
@@ -71,7 +71,7 @@ class aircraft_camera_data():
     def get_total_batch(self, data_index, batch_size=64):
         return int(math.ceil(self.video_length[data_index] / batch_size))
 
-    def get_frame_from_video(self, synced_index_or_batch_n=0, size=None, data_indexes=None, batch_size=None):
+    def get_frame_from_video(self, synced_index_or_batch_n=0, size=None, data_indexes=None, batch_size=None, raw = False):
         if size == None:
             size = (max(self.video_height), max(self.video_width))
         if batch_size != None:
@@ -84,24 +84,44 @@ class aircraft_camera_data():
                 f"Index given is out of range {self.synced_data_length}")
         if data_indexes == None:
             data_indexes = [i for i in range(self.data_count)]
-        imgs = np.zeros((batch_size, len(data_indexes), size[0], size[1], 3))
-        for data_index in data_indexes:
-            start_index = np.where(np.isnan(
-                self.calibration[synced_index:synced_index+batch_size, data_index]) == False)[0]
-            if start_index.shape[0] == 0:
-                continue
-            self.vidcap[data_index].set(
-                cv2.CAP_PROP_POS_FRAMES, self.calibration[synced_index+start_index[0]][data_index])
-            for i in range(start_index[0], batch_size):
-                if synced_index+start_index[0]+i == len(self.calibration) or np.isnan(self.calibration[synced_index+start_index[0]+i][data_index]):
-                    break
-                success, image = self.vidcap[data_index].read()
-                if success:
-                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                    imgs[i, data_index, :image.shape[0], :image.shape[1]] = image
-                else:
-                    break
-        return torch.from_numpy(imgs).float() / 255
+        if raw:
+            imgs = np.zeros((batch_size, len(data_indexes), size[0], size[1], 3))
+            for data_index in data_indexes:
+                start_index = np.where(np.isnan(
+                    self.calibration[synced_index:synced_index+batch_size, data_index]) == False)[0]
+                if start_index.shape[0] == 0:
+                    continue
+                self.vidcap[data_index].set(
+                    cv2.CAP_PROP_POS_FRAMES, self.calibration[synced_index+start_index[0]][data_index])
+                for i in range(start_index[0], batch_size):
+                    if synced_index+start_index[0]+i == len(self.calibration) or np.isnan(self.calibration[synced_index+start_index[0]+i][data_index]):
+                        break
+                    success, image = self.vidcap[data_index].read()
+                    if success:
+                        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                        imgs[i, data_index, :image.shape[0], :image.shape[1]] = image
+                    else:
+                        break
+                return imgs
+        else:
+            imgs = np.zeros((batch_size, len(data_indexes), size[0], size[1], 3))
+            for data_index in data_indexes:
+                start_index = np.where(np.isnan(
+                    self.calibration[synced_index:synced_index+batch_size, data_index]) == False)[0]
+                if start_index.shape[0] == 0:
+                    continue
+                self.vidcap[data_index].set(
+                    cv2.CAP_PROP_POS_FRAMES, self.calibration[synced_index+start_index[0]][data_index])
+                for i in range(start_index[0], batch_size):
+                    if synced_index+start_index[0]+i == len(self.calibration) or np.isnan(self.calibration[synced_index+start_index[0]+i][data_index]):
+                        break
+                    success, image = self.vidcap[data_index].read()
+                    if success:
+                        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                        imgs[i, data_index, :image.shape[0], :image.shape[1]] = image
+                    else:
+                        break
+            return torch.from_numpy(imgs).float() / 255
     
     def get_current_dtt(self, synced_index):
         current_calibration = self.calibration[synced_index]
@@ -116,16 +136,24 @@ class aircraft_camera_data():
         else:
             return -1
 
-    def vis_frame(self, synced_index, stacked=False, fig=None, ax=None):
-        if fig == None or ax == None:
+    def vis_frame(self, synced_index_or_img, stacked=False, fig=None, ax=None):
+        if isinstance(fig, NoneType) or isinstance(ax, NoneType):
             if stacked == True:
                 fig, ax = plt.subplots(1, 1, figsize=(20, 20))
             else:
                 fig, ax = plt.subplots(1, 2, figsize=(20, 20))
-        if synced_index > len(self.calibration):
-            raise "Index out of Range"
-        imgs = self.get_frame_from_video(
-            synced_index_or_batch_n=synced_index).numpy()
+        if isinstance (synced_index_or_img, int):
+            synced_index = synced_index_or_img
+            if synced_index > len(self.calibration):
+                raise "Index out of Range"
+            imgs = self.get_frame_from_video(
+                synced_index_or_batch_n=synced_index).numpy()
+        else:
+            imgs = synced_index_or_img
+            if isinstance(imgs, torch.Tensor):
+                imgs = imgs.cpu().numpy()
+            imgs = imgs.astype(str(synced_index_or_img.dtype).split('.')[-1])
+
         if isinstance(ax, np.ndarray) and len(ax) >= self.data_count:
             ax = ax.reshape(-1,)
             for i in range(self.data_count):
@@ -142,7 +170,7 @@ class aircraft_camera_data():
             data_indexes = [i for i in range(self.data_count)]
         all_distances = np.zeros((len(self.calibration), len(data_indexes)))
 
-        for synced_index in tqdm.trange(len(self.calibration)):
+        for synced_index in tqdm.trange(len(self.calibration), ncols=100):
             current_calibration = self.calibration[synced_index]
             if np.isnan(current_calibration[data_indexes]).all():
                 continue
@@ -178,7 +206,7 @@ class aircraft_camera_data():
     #     return img
 
 
-def load_compiled_data(ts=[1], ws=[1], rs=[1], unpacked_data = None, convert=True, inference_mode=False, offset=[[0, 0, 0, 0], [0, 0, 0, 0]], divider=[[1, 1, 1, 1], [1, 1, 1, 1]], trajectory_threshold=[np.inf, np.inf], device=torch.device('cpu'), verbose=True):
+def load_compiled_data(ts=[1], ws=[1], rs=[1], unpacked_data = None, convert=True, inference_mode=False, offset=[[0, 0, 0, 0], [0, 0, 0, 0]], divider=[[1, 1, 1, 1], [1, 1, 1, 1]], trajectory_threshold=[np.inf, np.inf], device=torch.device('cpu'), minimum_dist=1, output_directory='output/object_detector/', verbose=True):
     # Only support 2 cameras
     camera_1_data = []
     camera_2_data = []
@@ -191,13 +219,17 @@ def load_compiled_data(ts=[1], ws=[1], rs=[1], unpacked_data = None, convert=Tru
         for t in ts:
             for w in ws:
                 for r in rs:
-                    with open(f"output/object_detector/t{t}w{w}r{r}.pkl", 'rb') as f:
+                    with open(f"{output_directory}/t{t}w{w}r{r}.pkl", 'rb') as f:
                         box, scores, gt_distance = pkl.load(f)
                     gt_distance = torch.from_numpy(gt_distance)
-                    camera_1_det = torch.cat(((box[:, :4].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
-                        1) / 10, scores[:, 0].unsqueeze(1)), axis=1)
-                    camera_2_det = torch.cat(((box[:, 4:].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
-                        1) / 10, scores[:, 1].unsqueeze(1)), axis=1)
+                    try:
+                        camera_1_det = torch.cat(((box[:, :4].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
+                            1) / 10, scores[:len(gt_distance), 0].unsqueeze(1)), axis=1)
+                        camera_2_det = torch.cat(((box[:, 4:].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
+                            1) / 10, scores[:len(gt_distance), 1].unsqueeze(1)), axis=1)
+                    except:
+                        print(t,w,r)
+                        raise ExceptionError
 
                     # Remove Missing Detection
                     camera_1_data.append(camera_1_det)
@@ -236,28 +268,30 @@ def load_compiled_data(ts=[1], ws=[1], rs=[1], unpacked_data = None, convert=Tru
     f_camera_2_available_detection = torch.all(
         torch.logical_not(camera_2_xy[:, :4] == 0), dim=1)
 
-    f_camera_1_gt_more_than_1nm = camera_1_xy[:, -2] > 0.1
-    f_camera_2_gt_more_than_1nm = camera_2_xy[:, -2] > 0.1
+    f_camera_1_gt_more_than_minimum_dist = camera_1_xy[:, -2] > (minimum_dist/10)
+    f_camera_2_gt_more_than_minimum_dist = camera_2_xy[:, -2] > (minimum_dist/10)
 
     # landing trajectory threshold can be determined by plotting Y_centroid against dist)
     f_camera_1_detections_in_landing_trajectory = camera_1_xy[:, 1] < trajectory_threshold[0]
     f_camera_2_detections_in_landing_trajectory = camera_2_xy[:, 1] < trajectory_threshold[1]
 
     f_camera_single_1 = torch.logical_and(torch.logical_and(
-        f_camera_1_available_detection, f_camera_1_gt_more_than_1nm), f_camera_1_detections_in_landing_trajectory)
+        f_camera_1_available_detection, f_camera_1_gt_more_than_minimum_dist), f_camera_1_detections_in_landing_trajectory)
     f_camera_single_2 = torch.logical_and(torch.logical_and(
-        f_camera_2_available_detection, f_camera_2_gt_more_than_1nm), f_camera_2_detections_in_landing_trajectory)
+        f_camera_2_available_detection, f_camera_2_gt_more_than_minimum_dist), f_camera_2_detections_in_landing_trajectory)
 
     f_camera_all_available_detection = torch.logical_and(
         f_camera_1_available_detection, f_camera_2_available_detection)
-    f_camera_all_gt_more_than_1nm = torch.logical_and(
-        f_camera_1_gt_more_than_1nm, f_camera_2_gt_more_than_1nm)
+    f_camera_all_gt_more_than_minimum_dist = torch.logical_and(
+        f_camera_1_gt_more_than_minimum_dist, f_camera_2_gt_more_than_minimum_dist)
 
-    f_camera_dual = torch.logical_and(torch.logical_and(f_camera_all_available_detection, f_camera_all_gt_more_than_1nm), torch.logical_and(
+    f_camera_dual = torch.logical_and(torch.logical_and(f_camera_all_available_detection, f_camera_all_gt_more_than_minimum_dist), torch.logical_and(
         f_camera_1_detections_in_landing_trajectory, f_camera_2_detections_in_landing_trajectory))
 
     camera_1_xy[:, :4] = (camera_1_xy[:, :4] - offset[0]) / divider[0]
     camera_2_xy[:, :4] = (camera_2_xy[:, :4] - offset[1]) / divider[1]
+    
+    
 
     if inference_mode:
         camera_1_xy[:, :4][torch.logical_not(

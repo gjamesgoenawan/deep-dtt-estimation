@@ -5,12 +5,13 @@ import yaml
 import tqdm.auto as tqdm
 import numpy as np
 from types import NoneType
+from utils.object_detector import example_association_function
 from torch.utils.data import DataLoader
 from utils.dataset import GeneralDataset
 import torch.nn.init as init
 import utils.object_detector as od
+from torchvision.ops import box_convert
 import time
-
 import cv2
 
 
@@ -84,10 +85,11 @@ class mlp_dual(nn.Module):
 
 
 class end2end():
-    def __init__(self, model_conf, offset = None, divider = None, model_state_dict = None, num_camera = 2, img_size=(1920, 1280), kernel_size=640, engine_path=['models/object-detector/y7_b2.trt', 'models/object-detector/y7_b12.trt'], device = torch.device('cuda:0')):
+    def __init__(self, model_conf, offset = None, divider = None, model_state_dict = None, num_camera = 2, img_size=(1920, 1280), kernel_size=640, engine_path=['models/object-detector/y7_b1.trt', 'models/object-detector/y7_b12.trt'], association_function = example_association_function, device = torch.device('cuda:0')):
         self.device = device
         self.input_regs = []
         self.num_camera = num_camera
+        self.association_function = association_function
         self.offset = torch.tensor(offset if offset != None else ([[0,0,0,0]] * self.num_camera), device = device)
         self.divider = torch.tensor(divider if divider != None else ([[1,1,1,1]] * self.num_camera), device = device)
         self.ensemble = ensemble(model_conf=model_conf, model_state_dict=model_state_dict, parts_to_load=['input_reg', 'de', 'aux'], num_camera=self.num_camera, device=self.device)
@@ -98,20 +100,16 @@ class end2end():
             batch_img = batch_img.to(self.device)
         torch.cuda.synchronize()
         t0 = time.time()
-        box, score = self.mod.single_infer(batch_img, verbose=False)
+        box, score = self.mod.infer(batch_img, verbose=False, association_function = self.association_function)
         t1 = time.time()
-        box = box.reshape(-1, 4)
         
-        formated_box = torch.zeros(box.shape, device=self.device).float()
-        formated_box[:, 0] = (box[:, 0] + box[:, 2]) / 2
-        formated_box[:, 1] = (box[:, 1] + box[:, 3]) / 2
-        formated_box[:, 2] = (box[:, 2] - box[:, 0])
-        formated_box[:, 3] = (box[:, 3] - box[:, 1])
-        for i in range(self.num_camera):
-            if (formated_box[i] == 0).all() == False:
-                formated_box[i] = (formated_box[i] - self.offset[i]) / self.divider[i]
+        current_input = box[0].reshape(int(box[0].shape[1]/4), -1, 4)
+        current_input = box_convert(current_input, 'xyxy', 'cxcywh')
+        current_input[0] = (current_input[0] - self.offset[0]) / self.divider[0]
+        current_input[1] = (current_input[1] - self.offset[1]) / self.divider[1]
+        
         t2 = time.time()
-        pred = self.ensemble(formated_box.unsqueeze(1), batch_mode = False)
+        pred = self.ensemble([current_input], verbose = False)[0]
         t3 = time.time()
         if verbose:
             print(f"""Time Profile:
@@ -147,7 +145,7 @@ Total Time         : {((t3-t0) * 1000):.2f} ms ({1/(t3-t0)} FPS)
             
             if not (isinstance(pred, NoneType) or isinstance(gt, NoneType)):
                 label_pred = f'PRED : {pred:.2f}'
-                label_gt =   f'GT   : {gt:.2f}'
+                label_gt =   f'GT    : {gt:.2f}'
 
                 t_size = cv2.getTextSize(label_pred, 0, tl, tf)[0]
 
@@ -219,162 +217,66 @@ class ensemble(nn.Module):
             else:
                 self.model_state_dict = None
 
-    def forward(self, x, batch_mode = True, verbose = None):
-        if verbose == None:
-            verbose = self.verbose
-
-        if batch_mode == True:
-            with torch.no_grad():
-                input_reg_out = torch.zeros(
-                    (len(x[0]), len(x), self.transition_size), device=self.device, requires_grad=False)
-                out = torch.zeros(
-                    (len(x[0])), device=self.device, requires_grad=False)
-
-                for cam in range(input_reg_out.shape[1]):
-                    f = torch.logical_not(torch.all(x[cam] == 0, dim=1))
-                    input_reg_out[f, cam] = self.input_regs[cam](x[cam][f])
-                
-                if verbose:
-                    iterable = tqdm.trange(input_reg_out.shape[0])
-                else:
-                    iterable = range(input_reg_out.shape[0])
-                for index in iterable:
-                    ff = torch.any(input_reg_out[index] != 0, dim=1)
-                    if ff.any() == True:
-                        if len(input_reg_out[index][ff].shape) == 2:
-                            current_x = input_reg_out[index][ff].unsqueeze(0)
-                        else:
-                            current_x = input_reg_out[index][ff]
-                        out[index] = self.sequential_de(
-                            current_x)[-1].squeeze()
-                return out
-        else:
-            with torch.no_grad():
-                input_reg_out = torch.zeros(
-                    (len(x), self.transition_size), device=self.device, requires_grad=False)
-                for cam in range(input_reg_out.shape[0]):
-                    if not (x[cam] == 0).all():
-                        input_reg_out[cam] = self.input_regs[cam](x[cam][0])
-
-                ff = torch.any(input_reg_out != 0, dim=1)
-                out = torch.nan
-                if ff.any() == True:
-                    out = self.sequential_de(
-                        input_reg_out[ff].unsqueeze(0)).squeeze()
-                return out
-    
-    def eval_data(self, train_data, test_data, num_camera = 2, batch_size = 32):
-        criterion = torch.nn.MSELoss()
-        train_loss_aux = [None] * num_camera
-        test_loss_aux = [None] * num_camera
-        ypred_test_aux = [None] * num_camera
-        ypred_train_aux = [None] * num_camera
-        mape_train_aux = [None] * num_camera
-        mape_test_aux = [None] * num_camera
-        train_loss_de = None
-        test_loss_de = [None] * num_camera
-        ypred_test_de = [None] * num_camera
-        mape_train_de = 0
-        mape_test_de = [None] * num_camera
-        max_dist_test_de = [None] * num_camera
+    def forward(self, x, verbose = True):
         
+        if verbose:
+            iterable = tqdm.trange(len(x))
+        else:
+            iterable = range(len(x))
 
-        for i in self.input_regs:
-            i.eval()
-        self.aux_head.eval()
-        self.sequential_de.eval()
+        output = []
         with torch.no_grad():
-            for cam in range(num_camera):
-                # for train_x, train_y in singleview_dataloader[cam]:
-                train_x = train_data['single'][f'cam_{cam+1}']['x']
-                train_y = train_data['single'][f'cam_{cam+1}']['y']
-                train_loss_aux[cam] = criterion(self.aux_head(self.input_regs[cam](
-                    train_x)).squeeze(), train_y[:, 0])
+            for batch in iterable:
+                
+                current_output = []
+                for cam in range(self.num_camera):
+                    current_input = x[batch][cam]
+                    current_output.append(self.input_regs[cam](current_input))
+                output.append(self.sequential_de(torch.stack(current_output, axis = 1)).squeeze(1))
+            return output
 
-                ypred_test_aux[cam] = self.aux_head(self.input_regs[cam](
-                    test_data['single'][f'cam_{cam+1}']['x'])).squeeze()
-                ypred_train_aux[cam] = self.aux_head(self.input_regs[cam](
-                    train_data['single'][f'cam_{cam+1}']['x'])).squeeze()
-                test_loss_aux[cam] = criterion(
-                    ypred_test_aux[cam], test_data['single'][f'cam_{cam+1}']['y'][:, 0])
-                mape_test_aux[cam] = ((abs(ypred_test_aux[cam]-test_data['single']
-                                [f'cam_{cam+1}']['y'][:, 0])/test_data['single']
-                                [f'cam_{cam+1}']['y'][:, 0]).mean() * 100).item()
-                mape_train_aux[cam] = ((abs(ypred_train_aux[cam]-train_data['single']
-                                    [f'cam_{cam+1}']['y'][:, 0])/train_data['single']
-                                    [f'cam_{cam+1}']['y'][:, 0]).mean() * 100).item()
+        # if verbose == None:
+        #     verbose = self.verbose
 
-                train_x = torch.stack([self.input_regs[i](
-                    train_data['dual'][f'cam_{i+1}']['x']) for i in range(num_camera)], dim=1)
-                train_y = torch.stack(
-                    [train_data['dual'][f'cam_{i+1}']['y'] for i in range(num_camera)], dim=1)
+        # if batch_mode == True:
+        #     with torch.no_grad():
+        #         input_reg_out = torch.zeros(
+        #             (len(x[0]), len(x), self.transition_size), device=self.device, requires_grad=False)
+        #         out = torch.zeros(
+        #             (len(x[0])), device=self.device, requires_grad=False)
 
-                test_per_cam = [{'x': torch.stack([self.input_regs[i](test_data['dual'][f'cam_{i+1}']['x']) for i in range(num_camera)], dim=1),
-                                'y': torch.stack([test_data['dual'][f'cam_{i+1}']['y'] for i in range(num_camera)], dim=1)},
-                                {'x': torch.cat([self.input_regs[i](test_data['single'][f'cam_{i+1}']['x']) for i in range(num_camera)]).unsqueeze(1),
-                                'y': torch.cat([test_data['single'][f'cam_{i+1}']['y'] for i in range(num_camera)]).unsqueeze(1)}]
+        #         for cam in range(input_reg_out.shape[1]):
+        #             f = torch.logical_not(torch.all(x[cam] == 0, dim=1))
+        #             input_reg_out[f, cam] = self.input_regs[cam](x[cam][f])
+                
+        #         if verbose:
+        #             iterable = tqdm.trange(input_reg_out.shape[0])
+        #         else:
+        #             iterable = range(input_reg_out.shape[0])
+        #         for index in iterable:
+        #             ff = torch.any(input_reg_out[index] != 0, dim=1)
+        #             if ff.any() == True:
+        #                 if len(input_reg_out[index][ff].shape) == 2:
+        #                     current_x = input_reg_out[index][ff].unsqueeze(0)
+        #                 else:
+        #                     current_x = input_reg_out[index][ff]
+        #                 out[index] = self.sequential_de(
+        #                     current_x)[-1].squeeze()
+        #         return out
+        # else:
+        #     with torch.no_grad():
+        #         input_reg_out = torch.zeros(
+        #             (len(x), self.transition_size), device=self.device, requires_grad=False)
+        #         for cam in range(input_reg_out.shape[0]):
+        #             if not (x[cam] == 0).all():
+        #                 input_reg_out[cam] = self.input_regs[cam](x[cam][0])
 
-            od_dataloader = DataLoader(GeneralDataset(
-                train_x, train_y), batch_size=batch_size, shuffle=True)
-
-            total_data = len(train_x)
-
-            for train_minibatch_x, train_minibatch_y in od_dataloader:
-                ypred = self.sequential_de(train_minibatch_x)[:, -1].squeeze()
-                train_loss_de = criterion(ypred, train_minibatch_y[:, 0, 0])
-                mape_train_de += ((abs(ypred-train_minibatch_y[:, 0, 0])/train_minibatch_y[:, 0, 0]).mean() * 100).item() * len(train_minibatch_x)
-
-            for cam in range(0, 2):
-                ypred_test_de[cam] = self.sequential_de(test_per_cam[cam]['x']).squeeze()
-                test_loss_de[cam] = criterion(ypred_test_de[cam], test_per_cam[cam]['y'][:, 0, 0])
-                mape_test_de[cam] = ((abs(ypred_test_de[cam]-test_per_cam[cam]['y'][:, 0, 0])/test_per_cam[cam]['y'][:, 0, 0]).mean() * 100).item()
-                max_dist_test_de[cam] = abs(ypred_test_de[cam]-test_per_cam[cam]['y'][:, 0, 0]).max()
-
-
-        print(f"""==========================
-MODEL EVALUATION
-
-Trained Epochs : 
-    Aux : {self.epochs['aux']}
-    De  : {self.epochs['de']}
-
-Input Regularization
-Loss:
-    Train:
-        Cam 1 : {train_loss_aux[0]}
-        Cam 2 : {train_loss_aux[1]}
-    Test:
-        Cam 1 : {test_loss_aux[0]}
-        Cam 2 : {test_loss_aux[1]}
-
-MAPE
-    Train:
-        Cam 1 : {mape_train_aux[0]:.2f}%
-        Cam 2 : {mape_train_aux[1]:.2f}%
-    Test:
-        Cam 1 : {mape_test_aux[0]:.2f}%
-        Cam 2 : {mape_test_aux[1]:.2f}%
-    
-Distance Estimator
-Loss:
-    Train:
-        Current : {train_loss_de}
-
-    Test:
-        Deep    : {test_loss_de[0]}
-        Shallow : {test_loss_de[1]}
-
-MAPE 
-    Train:
-        Current : {(mape_train_de / total_data):.2f}%
-    Test:
-        Deep    : {mape_test_de[0]:.2f}%
-        Shallow : {mape_test_de[1]:.2f}%
-    Test (Max):
-        Deep    : {max_dist_test_de[0]:.2f} nm
-        Shallow : {max_dist_test_de[1]:.2f} nm
-==========================""")
-    
+        #         ff = torch.any(input_reg_out != 0, dim=1)
+        #         out = torch.nan
+        #         if ff.any() == True:
+        #             out = self.sequential_de(
+        #                 input_reg_out[ff].unsqueeze(0)).squeeze()
+        #         return out
 
 
 def weight_init(m):
