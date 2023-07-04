@@ -189,6 +189,7 @@ class ensemble(nn.Module):
         self.device = device
         self.num_camera = num_camera
         self.training_log = {'aux': None, 'de': None}
+        self.empty_result = torch.tensor([-1], device = self.device)
         self.epochs = {'aux': 0, 'de': 0}
         self.model_state_dict = None
         self.input_regs = nn.ModuleList([nn.Sequential(*self.load_layers(conf['input_reg'])).to(self.device) for cam in range(0, num_camera)])
@@ -199,7 +200,7 @@ class ensemble(nn.Module):
         if initializer == 'xavier':
             self.apply(weight_init)
 
-        if model_state_dict != None:
+        if model_state_dict is not None:
             self.model_state_dict = torch.load(model_state_dict)
             if self.model_state_dict['num_camera'] == num_camera:
                 if 'input_reg' in parts_to_load:
@@ -218,66 +219,23 @@ class ensemble(nn.Module):
                 self.model_state_dict = None
 
     def forward(self, x, verbose = True):
-        
         if verbose:
-            iterable = tqdm.trange(len(x))
+            iterable = tqdm.trange(x.shape[1])
         else:
-            iterable = range(len(x))
-
+            iterable = range(x.shape[1])
         output = []
         with torch.no_grad():
             for batch in iterable:
-                
                 current_output = []
                 for cam in range(self.num_camera):
-                    current_input = x[batch][cam]
-                    current_output.append(self.input_regs[cam](current_input))
-                output.append(self.sequential_de(torch.stack(current_output, axis = 1)).squeeze(1))
-            return output
-
-        # if verbose == None:
-        #     verbose = self.verbose
-
-        # if batch_mode == True:
-        #     with torch.no_grad():
-        #         input_reg_out = torch.zeros(
-        #             (len(x[0]), len(x), self.transition_size), device=self.device, requires_grad=False)
-        #         out = torch.zeros(
-        #             (len(x[0])), device=self.device, requires_grad=False)
-
-        #         for cam in range(input_reg_out.shape[1]):
-        #             f = torch.logical_not(torch.all(x[cam] == 0, dim=1))
-        #             input_reg_out[f, cam] = self.input_regs[cam](x[cam][f])
-                
-        #         if verbose:
-        #             iterable = tqdm.trange(input_reg_out.shape[0])
-        #         else:
-        #             iterable = range(input_reg_out.shape[0])
-        #         for index in iterable:
-        #             ff = torch.any(input_reg_out[index] != 0, dim=1)
-        #             if ff.any() == True:
-        #                 if len(input_reg_out[index][ff].shape) == 2:
-        #                     current_x = input_reg_out[index][ff].unsqueeze(0)
-        #                 else:
-        #                     current_x = input_reg_out[index][ff]
-        #                 out[index] = self.sequential_de(
-        #                     current_x)[-1].squeeze()
-        #         return out
-        # else:
-        #     with torch.no_grad():
-        #         input_reg_out = torch.zeros(
-        #             (len(x), self.transition_size), device=self.device, requires_grad=False)
-        #         for cam in range(input_reg_out.shape[0]):
-        #             if not (x[cam] == 0).all():
-        #                 input_reg_out[cam] = self.input_regs[cam](x[cam][0])
-
-        #         ff = torch.any(input_reg_out != 0, dim=1)
-        #         out = torch.nan
-        #         if ff.any() == True:
-        #             out = self.sequential_de(
-        #                 input_reg_out[ff].unsqueeze(0)).squeeze()
-        #         return out
-
+                    current_input = x[cam][batch]
+                    if current_input.sum() != 0:
+                        current_output.append(self.input_regs[cam](current_input))
+                if len(current_output) >= 1:
+                    output.append(self.sequential_de(torch.stack(current_output, axis = 0).unsqueeze(0)).squeeze(1))
+                else: 
+                    output.append(self.empty_result)
+            return torch.cat(output)
 
 def weight_init(m):
     '''

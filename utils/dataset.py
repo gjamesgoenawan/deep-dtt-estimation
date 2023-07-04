@@ -9,6 +9,7 @@ import math
 import torch
 from types import NoneType
 from fastdtw import fastdtw
+from torchvision.ops import box_convert
 
 
 def time_shift_calibration(data=[]):
@@ -244,24 +245,14 @@ def load_compiled_data(ts=[1], ws=[1], rs=[1], unpacked_data = None, convert=Tru
             1) / 10, scores[:, 0].unsqueeze(1)), axis=1)
         camera_2_data = torch.cat(((box[:, 4:].float()[:len(gt_distance)]), gt_distance[:, 0].unsqueeze(
             1) / 10, scores[:, 1].unsqueeze(1)), axis=1)
-
+    
+    camera_1_xy = camera_1_data.float().to(device)
+    camera_2_xy = camera_2_data.float().to(device)
+    
     if convert:
         # Convert to (X_centroid, Y_centroid, X_width, Y_width)
-        camera_1_xy = torch.zeros(camera_1_data.shape, device=device).float()
-        camera_2_xy = torch.zeros(camera_2_data.shape, device=device).float()
-        camera_1_xy[:, 0] = (camera_1_data[:, 0] + camera_1_data[:, 2]) / 2
-        camera_1_xy[:, 1] = (camera_1_data[:, 1] + camera_1_data[:, 3]) / 2
-        camera_1_xy[:, 2] = (camera_1_data[:, 2] - camera_1_data[:, 0])
-        camera_1_xy[:, 3] = (camera_1_data[:, 3] - camera_1_data[:, 1])
-        camera_1_xy[:, 4:] = camera_1_data[:, 4:]
-        camera_2_xy[:, 0] = (camera_2_data[:, 0] + camera_2_data[:, 2]) / 2
-        camera_2_xy[:, 1] = (camera_2_data[:, 1] + camera_2_data[:, 3]) / 2
-        camera_2_xy[:, 2] = (camera_2_data[:, 2] - camera_2_data[:, 0])
-        camera_2_xy[:, 3] = (camera_2_data[:, 3] - camera_2_data[:, 1])
-        camera_2_xy[:, 4:] = camera_2_data[:, 4:]
-    else:
-        camera_1_xy = camera_1_data.float().to(device)
-        camera_2_xy = camera_2_data.float().to(device)
+        camera_1_xy = torch.cat((box_convert(camera_1_xy[:, :4], "xyxy", "cxcywh"), camera_1_xy[:, 4:]), dim = 1)
+        camera_2_xy = torch.cat((box_convert(camera_2_xy[:, :4], "xyxy", "cxcywh"), camera_2_xy[:, 4:]), dim = 1)
 
     f_camera_1_available_detection = torch.all(
         torch.logical_not(camera_1_xy[:, :4] == 0), dim=1)
