@@ -109,7 +109,7 @@ class end2end():
         current_input[1] = (current_input[1] - self.offset[1]) / self.divider[1]
         
         t2 = time.time()
-        pred = self.ensemble([current_input], verbose = False)[0]
+        pred = self.ensemble(current_input, verbose = False)[0]
         t3 = time.time()
         if verbose:
             print(f"""Time Profile:
